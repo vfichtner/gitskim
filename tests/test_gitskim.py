@@ -245,5 +245,87 @@ class TestTokensAndSecrets(unittest.TestCase):
         self.assertFalse(gitskim.matches_any("src/env.py", gitskim.SECRET_PATHS))
 
 
+PY_SAMPLE = '''"""Module docstring line one.
+
+More docs."""
+import os
+import sys as system
+from pathlib import Path
+from . import sibling
+
+MAX_RETRIES = 3
+
+@dataclass
+class User(Base, Mixin):
+    """A user."""
+    name: str
+    age: int = 0
+
+    def greet(self, loud: bool = False) -> str:
+        """Say hi."""
+        return "hi"
+
+    @property
+    async def token(self):
+        return await fetch()
+
+
+class Empty:
+    pass
+
+
+def helper(x: int, *args, key=None, **kw) -> list[int]:
+    return [x]
+
+
+async def run():
+    pass
+'''
+
+
+class TestSkimPython(unittest.TestCase):
+    def setUp(self):
+        self.out = gitskim.skim_python(PY_SAMPLE)
+
+    def test_module_docstring_first_line(self):
+        self.assertIn('"""Module docstring line one."""', self.out)
+        self.assertNotIn("More docs", self.out)
+
+    def test_imports(self):
+        self.assertIn("import os", self.out)
+        self.assertIn("import sys as system", self.out)
+        self.assertIn("from pathlib import Path", self.out)
+        self.assertIn("from . import sibling", self.out)
+
+    def test_constants(self):
+        self.assertIn("MAX_RETRIES = ...", self.out)
+
+    def test_class_with_bases_fields_and_methods(self):
+        self.assertIn("@dataclass", self.out)
+        self.assertIn("class User(Base, Mixin):", self.out)
+        self.assertIn('    """A user."""', self.out)
+        self.assertIn("    name: str", self.out)
+        self.assertIn("    age: int", self.out)
+        self.assertIn("    def greet(self, loud: bool=False) -> str: ...", self.out)
+        self.assertIn('        """Say hi."""', self.out)
+        self.assertIn("    @property", self.out)
+        self.assertIn("    async def token(self): ...", self.out)
+
+    def test_empty_class(self):
+        self.assertIn("class Empty:\n    ...", self.out)
+
+    def test_top_level_functions(self):
+        self.assertIn("def helper(x: int, *args, key=None, **kw) -> list[int]: ...", self.out)
+        self.assertIn("async def run(): ...", self.out)
+
+    def test_no_bodies(self):
+        self.assertNotIn('return "hi"', self.out)
+        self.assertNotIn("return [x]", self.out)
+
+    def test_syntax_error_falls_back(self):
+        out = gitskim.skim_python("def broken(:\n  pass\n" * 40)
+        self.assertIn("more lines", out)
+
+
 if __name__ == "__main__":
     unittest.main()

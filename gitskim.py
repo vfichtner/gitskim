@@ -261,7 +261,92 @@ def find_secret(text: str) -> Optional[str]:
 
 # ── Skimmers ──────────────────────────────────────────────────────────────────
 
-# (Tasks 6, 7)
+FALLBACK_LINES = 30
+
+
+def skim_fallback(text: str, keep: int = FALLBACK_LINES) -> str:
+    """Unknown file type: first N lines, then a count of the rest."""
+    lines = text.splitlines()
+    if len(lines) <= keep:
+        return text.rstrip("\n")
+    rest = len(lines) - keep
+    return "\n".join(lines[:keep]) + f"\n… ({rest} more lines)"
+
+
+def _first_doc_line(node) -> Optional[str]:
+    doc = ast.get_docstring(node)
+    return doc.strip().splitlines()[0] if doc else None
+
+
+def _py_func(node, indent: int) -> list:
+    pad = "    " * indent
+    out = [f"{pad}@{ast.unparse(d)}" for d in node.decorator_list]
+    kw = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+    out.append(f"{pad}{kw} {node.name}({ast.unparse(node.args)}){ret}: ...")
+    doc = _first_doc_line(node)
+    if doc:
+        out.append(f'{pad}    """{doc}"""')
+    return out
+
+
+def _py_class(node) -> list:
+    out = [f"@{ast.unparse(d)}" for d in node.decorator_list]
+    bases = ", ".join(ast.unparse(b) for b in node.bases)
+    out.append(f"class {node.name}({bases}):" if bases else f"class {node.name}:")
+    doc = _first_doc_line(node)
+    if doc:
+        out.append(f'    """{doc}"""')
+    members = 0
+    for n in node.body:
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.append(f"    {n.target.id}: {ast.unparse(n.annotation)}")
+            members += 1
+    for n in node.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.extend(_py_func(n, 1))
+            members += 1
+    if members == 0 and not doc:
+        out.append("    ...")
+    return out
+
+
+def skim_python(text: str) -> str:
+    """Signatures only: docstring, imports, constants, classes, functions."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return skim_fallback(text)
+    out: list = []
+    doc = _first_doc_line(tree)
+    if doc:
+        out.append(f'"""{doc}"""')
+    imports = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imports.append(ast.unparse(node))
+    out.extend(imports)
+    body: list = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            body.extend(_py_func(node, 0))
+            body.append("")
+        elif isinstance(node, ast.ClassDef):
+            body.extend(_py_class(node))
+            body.append("")
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name) and t.id.isupper()]
+            if names:
+                body.append(f"{' = '.join(names)} = ...")
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id.isupper():
+            body.append(f"{node.target.id}: {ast.unparse(node.annotation)} = ...")
+    if imports and body:
+        out.append("")
+    out.extend(body)
+    return "\n".join(out).rstrip("\n")
+
+
+# (Task 7)
 
 
 # ── Database changelogs ───────────────────────────────────────────────────────
