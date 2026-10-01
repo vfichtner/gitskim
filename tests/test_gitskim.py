@@ -213,5 +213,37 @@ class TestRankFiles(unittest.TestCase):
         self.assertEqual([e.path for e in entries], ["a.txt", "b.txt"])
 
 
+class TestTokensAndSecrets(unittest.TestCase):
+    def test_estimate_tokens(self):
+        self.assertEqual(gitskim.estimate_tokens(""), 0)
+        self.assertEqual(gitskim.estimate_tokens("x" * 400), 100)
+
+    def test_fmt_tokens(self):
+        self.assertEqual(gitskim.fmt_tokens(950), "950")
+        self.assertEqual(gitskim.fmt_tokens(38_400), "38.4k")
+
+    def test_detects_aws_key(self):
+        text = "key = " + "AKIA" + "IOSFODNN7EXAMPLE"
+        self.assertEqual(gitskim.find_secret(text), "AWS access key")
+
+    def test_detects_private_key_block(self):
+        text = "-----BEGIN " + "RSA PRIVATE KEY-----\nabc"
+        self.assertEqual(gitskim.find_secret(text), "private key")
+
+    def test_detects_generic_assignment(self):
+        text = 'db_' + 'password = "' + "s3cr3tpassw0rd" + '"'
+        self.assertEqual(gitskim.find_secret(text), "credential assignment")
+
+    def test_clean_text_passes(self):
+        self.assertIsNone(gitskim.find_secret("def main():\n    return 42\n"))
+        self.assertIsNone(gitskim.find_secret('password = os.environ["DB_PASSWORD"]'))
+
+    def test_secret_paths(self):
+        self.assertTrue(gitskim.matches_any(".env", gitskim.SECRET_PATHS))
+        self.assertTrue(gitskim.matches_any("config/.env.local", gitskim.SECRET_PATHS))
+        self.assertTrue(gitskim.matches_any("certs/server.pem", gitskim.SECRET_PATHS))
+        self.assertFalse(gitskim.matches_any("src/env.py", gitskim.SECRET_PATHS))
+
+
 if __name__ == "__main__":
     unittest.main()

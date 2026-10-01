@@ -226,7 +226,37 @@ def rank_files(repo: Path, entries: list, sort: str = "changes", max_commits: in
 
 # ── Tokens & secrets ──────────────────────────────────────────────────────────
 
-# (Task 5)
+def estimate_tokens(text: str) -> int:
+    """Rough estimate: ~4 characters per token. Marked 'est.' in output."""
+    return len(text) // 4
+
+
+def fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+SECRET_PATHS = [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*.keystore"]
+
+SECRET_PATTERNS = [
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    ("Stripe live key", re.compile(r"\bsk_live_[0-9a-zA-Z]{20,}\b")),
+    ("credential assignment", re.compile(
+        # \w* prefix so db_password / MY_SECRET match; a leading \b alone would miss them
+        r"(?i)\b\w*(api[_-]?key|secret|password|passwd|token)\w*\s*[=:]\s*[\"'][^\"'\s]{8,}[\"']")),
+]
+
+
+def find_secret(text: str) -> Optional[str]:
+    """Return a short label for the first secret-looking pattern found, else None."""
+    for label, pat in SECRET_PATTERNS:
+        if pat.search(text):
+            return label
+    return None
 
 
 # ── Skimmers ──────────────────────────────────────────────────────────────────
