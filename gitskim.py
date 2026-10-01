@@ -575,7 +575,42 @@ def skim_db_changelog(rel: str, text: str) -> list:
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
-# (Tasks 9, 10)
+def _tree_note(e: FileEntry) -> str:
+    if e.status == "too_large":
+        return f"  (skipped, {max(1, e.size // 1024)} KB)"
+    if e.status == "binary":
+        return "  (binary)"
+    if e.status == "secret":
+        return "  ⚠ skipped (possible secret)"
+    if e.status == "error":
+        return "  (unreadable)"
+    return ""
+
+
+def render_tree(entries: list) -> str:
+    """ASCII tree. Directories first, then files, both case-insensitively sorted."""
+    root: dict = {}
+    for e in entries:
+        node = root
+        parts = e.path.split("/")
+        for part in parts[:-1]:
+            node = node.setdefault(part + "/", {})
+        node[parts[-1]] = e
+    lines: list = []
+
+    def walk(node: dict, prefix: str) -> None:
+        items = sorted(node.items(), key=lambda kv: (not kv[0].endswith("/"), kv[0].lower()))
+        for i, (name, val) in enumerate(items):
+            last = i == len(items) - 1
+            lines.append(f"{prefix}{'└── ' if last else '├── '}{name}{_tree_note(val) if isinstance(val, FileEntry) else ''}")
+            if isinstance(val, dict):
+                walk(val, prefix + ("    " if last else "│   "))
+
+    walk(root, "")
+    return "\n".join(lines)
+
+
+# (Task 10)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

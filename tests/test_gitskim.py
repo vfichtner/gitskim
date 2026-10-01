@@ -529,5 +529,25 @@ class TestLiquibase(unittest.TestCase):
         ])
 
 
+class TestRenderTree(unittest.TestCase):
+    def test_tree_with_notes(self):
+        entries = [
+            gitskim.FileEntry("src/app.py", 10),
+            gitskim.FileEntry("src/big.bin", 300 * 1024, status="too_large"),
+            gitskim.FileEntry("README.md", 5),
+            gitskim.FileEntry("img.dat", 3, status="binary"),
+            gitskim.FileEntry(".env", 3, status="secret"),
+        ]
+        out = gitskim.render_tree(entries)
+        self.assertEqual(out.splitlines(), [
+            "├── src/",
+            "│   ├── app.py",
+            "│   └── big.bin  (skipped, 300 KB)",
+            "├── .env  ⚠ skipped (possible secret)",
+            "├── img.dat  (binary)",
+            "└── README.md",
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()
