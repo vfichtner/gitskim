@@ -155,7 +155,7 @@ def matches_any(rel: str, patterns: list, casefold: bool = False) -> bool:
             fnmatch.fnmatchcase(rel, p.lower()) or fnmatch.fnmatchcase(name, p.lower())
             for p in patterns
         )
-    return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(name, p) for p in patterns)
+    return any(fnmatch.fnmatchcase(rel, p) or fnmatch.fnmatchcase(name, p) for p in patterns)
 
 
 def in_ignored_dir(rel: str) -> bool:
@@ -214,7 +214,8 @@ def rank_files(repo: Path, entries: list, sort: str = "changes", max_commits: in
     """Sort entries in place. 'changes' = most-committed first (LLMs read top-down)."""
     if sort == "changes":
         try:
-            out = run_git(repo, "log", "--name-only", "--format=", f"-n{max_commits}")
+            # quotepath=off: otherwise non-ASCII paths come back as "caf\303\251.txt"
+            out = run_git(repo, "-c", "core.quotepath=off", "log", "--name-only", "--format=", f"-n{max_commits}")
         except GitskimError:          # e.g. repo without commits
             out = ""
         counts = Counter(line for line in out.splitlines() if line)
@@ -238,6 +239,13 @@ def fmt_tokens(n: int) -> str:
 
 
 SECRET_PATHS = [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*.keystore"]
+SECRET_PATH_EXCEPTIONS = [".env.example", ".env.sample", ".env.template", ".env.dist", "*.example", "*.sample", "*.template"]
+
+
+def is_secret_path(rel: str) -> bool:
+    """Secret-looking filename, unless it is an example/template variant."""
+    return matches_any(rel, SECRET_PATHS) and not matches_any(rel, SECRET_PATH_EXCEPTIONS)
+
 
 SECRET_PATTERNS = [
     ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
@@ -248,8 +256,13 @@ SECRET_PATTERNS = [
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
     ("Stripe live key", re.compile(r"\bsk_live_[0-9a-zA-Z]{20,}\b")),
     ("credential assignment", re.compile(
-        # \w* prefix so db_password / MY_SECRET match; a leading \b alone would miss them
-        r"(?i)\b\w*(api[_-]?key|secret|password|passwd|token)\w*\s*[=:]\s*[\"'][^\"'\s]{8,}[\"']")),
+        # \w* prefix so db_password / ACCESS_TOKEN match; no suffix so tokenizer / TOKEN_HEADER
+        # / api_key_file don't. secret[_-]?key is listed because SECRET_KEY would otherwise be
+        # missed (the keyword must directly precede '=' or ':'). Lookaheads skip placeholders.
+        r"(?i)\b\w*(api[_-]?key|secret[_-]?key|secret|password|passwd|token)\s*[=:]\s*[\"']"
+        r"(?!\$\{|\{\{|<|%\()"
+        r"(?![^\"'\s]*(?:your|example|changeme|change-me|xxx|dummy|placeholder|redacted))"
+        r"[^\"'\s]{8,}[\"']")),
 ]
 
 
@@ -285,36 +298,56 @@ def _py_func(node, indent: int) -> list:
     out = [f"{pad}@{ast.unparse(d)}" for d in node.decorator_list]
     kw = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
     ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
-    out.append(f"{pad}{kw} {node.name}({ast.unparse(node.args)}){ret}: ...")
+    head = f"{pad}{kw} {node.name}({ast.unparse(node.args)}){ret}:"
     doc = _first_doc_line(node)
     if doc:
-        out.append(f'{pad}    """{doc}"""')
+        out += [head, f'{pad}    """{doc}"""']
+    else:
+        out.append(head + " ...")
     return out
 
 
-def _py_class(node) -> list:
-    out = [f"@{ast.unparse(d)}" for d in node.decorator_list]
+MAX_DEFAULT_LEN = 60
+
+
+def _py_value(node) -> str:
+    """Unparsed default/value, truncated so giant literals don't bloat the skim."""
+    v = ast.unparse(node)
+    return v if len(v) <= MAX_DEFAULT_LEN else v[:MAX_DEFAULT_LEN] + "…"
+
+
+def _py_class(node, indent: int = 0) -> list:
+    pad = "    " * indent
+    out = [f"{pad}@{ast.unparse(d)}" for d in node.decorator_list]
     bases = ", ".join(ast.unparse(b) for b in node.bases)
-    out.append(f"class {node.name}({bases}):" if bases else f"class {node.name}:")
+    out.append(f"{pad}class {node.name}({bases}):" if bases else f"{pad}class {node.name}:")
     doc = _first_doc_line(node)
     if doc:
-        out.append(f'    """{doc}"""')
+        out.append(f'{pad}    """{doc}"""')
     members = 0
-    for n in node.body:
+    for n in node.body:                       # fields (with defaults)
         if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-            out.append(f"    {n.target.id}: {ast.unparse(n.annotation)}")
+            line = f"{pad}    {n.target.id}: {ast.unparse(n.annotation)}"
+            if n.value is not None:
+                line += f" = {_py_value(n.value)}"
+            out.append(line)
             members += 1
-    for n in node.body:
+    for n in node.body:                       # nested classes (Meta, Config, ...)
+        if isinstance(n, ast.ClassDef):
+            out.extend(_py_class(n, indent + 1))
+            members += 1
+    for n in node.body:                       # methods
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out.extend(_py_func(n, 1))
+            out.extend(_py_func(n, indent + 1))
             members += 1
     if members == 0 and not doc:
-        out.append("    ...")
+        out.append(f"{pad}    ...")
     return out
 
 
 def skim_python(text: str) -> str:
     """Signatures only: docstring, imports, constants, classes, functions."""
+    text = text.lstrip("\ufeff")
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):

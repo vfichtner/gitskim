@@ -195,22 +195,29 @@ class TestCollectFiles(unittest.TestCase):
 
 
 class TestRankFiles(unittest.TestCase):
-    def test_sorted_by_commit_count_then_path(self):
-        repo = make_repo(
-            {"a.txt": "1", "b.txt": "1", "c.txt": "1"},
-            extra_commits={"c.txt": "2", "b.txt": "2", "c.txt ": "3"},
-            case=self,
-        )
-        # note: "c.txt " with trailing space is a different file; harmless, tests robustness.
-        # One more commit on c.txt so counts are c=3, b=2, a=1, "c.txt "=1 (dict keys can't repeat).
-        (repo / "c.txt").write_text("3", encoding="utf-8")
+    @staticmethod
+    def touch(repo, rel, content):
+        (repo / rel).write_text(content, encoding="utf-8")
         git(repo, "add", "-A")
-        git(repo, "commit", "-q", "-m", "touch c.txt again")
+        git(repo, "commit", "-q", "-m", f"touch {rel}")
+
+    def test_sorted_by_commit_count_then_path(self):
+        repo = make_repo({"a.txt": "1", "b.txt": "1", "c.txt": "1"}, case=self)
+        self.touch(repo, "c.txt", "2")
+        self.touch(repo, "c.txt", "3")
+        self.touch(repo, "b.txt", "2")
         entries = gitskim.collect_files(repo, gitskim.Options())
         gitskim.rank_files(repo, entries, "changes")
-        self.assertEqual([e.path for e in entries], ["c.txt", "b.txt", "a.txt", "c.txt "])
-        self.assertEqual(next(e for e in entries if e.path == "c.txt").commits, 3)
-        self.assertEqual(next(e for e in entries if e.path == "c.txt ").commits, 1)
+        self.assertEqual([e.path for e in entries], ["c.txt", "b.txt", "a.txt"])
+        self.assertEqual([e.commits for e in entries], [3, 2, 1])
+
+    def test_non_ascii_path_counts(self):
+        repo = make_repo({"café.txt": "1", "plain.txt": "1"}, case=self)
+        self.touch(repo, "café.txt", "2")
+        entries = gitskim.collect_files(repo, gitskim.Options())
+        gitskim.rank_files(repo, entries, "changes")
+        self.assertEqual([e.path for e in entries], ["café.txt", "plain.txt"])
+        self.assertEqual(entries[0].commits, 2)
 
     def test_sort_path(self):
         repo = make_repo({"b.txt": "1", "a.txt": "1"}, extra_commits={"b.txt": "2"}, case=self)
@@ -237,8 +244,34 @@ class TestTokensAndSecrets(unittest.TestCase):
         self.assertEqual(gitskim.find_secret(text), "private key")
 
     def test_detects_generic_assignment(self):
-        text = 'db_' + 'password = "' + "s3cr3tpassw0rd" + '"'
-        self.assertEqual(gitskim.find_secret(text), "credential assignment")
+        for text in [
+            'db_' + 'password = "' + "s3cr3tpassw0rd" + '"',
+            'access_' + 'token: "' + "abcd1234efgh" + '"',
+            'SECRET_' + 'KEY = "' + "dj4ng0-s3cr3t-k3y" + '"',
+        ]:
+            self.assertEqual(gitskim.find_secret(text), "credential assignment", text)
+
+    def test_generic_assignment_ignores_lookalikes_and_placeholders(self):
+        for text in [
+            'tokenizer = "bert-base-uncased"',
+            'TOKEN_HEADER = "Authorization"',
+            'api_key_file = "config/keys.json"',
+            'password: "${DB_PASSWORD}"',
+            'API_KEY="your-api-key-here"',
+            'secret: "<redacted>"',
+        ]:
+            self.assertIsNone(gitskim.find_secret(text), text)
+
+    def test_detects_vendor_tokens(self):
+        cases = [
+            ("GitHub token", "ghp_" + "A1b2C3d4" * 4 + "wxyz"),
+            ("Slack token", "xoxb-" + "1234567890-abcdefghij"),
+            ("Google API key", "AIza" + "SyD" + "x" * 32),
+            ("JWT", "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcDEF123_-xyz789"),
+            ("Stripe live key", "sk_live_" + "a1B2" * 6),
+        ]
+        for label, token in cases:
+            self.assertEqual(gitskim.find_secret(f"x = '{token}'"), label, label)
 
     def test_clean_text_passes(self):
         self.assertIsNone(gitskim.find_secret("def main():\n    return 42\n"))
@@ -249,6 +282,12 @@ class TestTokensAndSecrets(unittest.TestCase):
         self.assertTrue(gitskim.matches_any("config/.env.local", gitskim.SECRET_PATHS))
         self.assertTrue(gitskim.matches_any("certs/server.pem", gitskim.SECRET_PATHS))
         self.assertFalse(gitskim.matches_any("src/env.py", gitskim.SECRET_PATHS))
+
+    def test_is_secret_path_exempts_templates(self):
+        self.assertTrue(gitskim.is_secret_path(".env.local"))
+        self.assertTrue(gitskim.is_secret_path("certs/server.pem"))
+        for rel in [".env.example", ".env.sample", ".env.template", ".env.dist", "certs/server.pem.example"]:
+            self.assertFalse(gitskim.is_secret_path(rel), rel)
 
 
 PY_SAMPLE = '''"""Module docstring line one.
@@ -266,6 +305,7 @@ class User(Base, Mixin):
     """A user."""
     name: str
     age: int = 0
+    tags: list = field(default_factory=list)
 
     def greet(self, loud: bool = False) -> str:
         """Say hi."""
@@ -311,9 +351,11 @@ class TestSkimPython(unittest.TestCase):
         self.assertIn("class User(Base, Mixin):", self.out)
         self.assertIn('    """A user."""', self.out)
         self.assertIn("    name: str", self.out)
-        self.assertIn("    age: int", self.out)
-        self.assertIn("    def greet(self, loud: bool=False) -> str: ...", self.out)
-        self.assertIn('        """Say hi."""', self.out)
+        self.assertIn("    age: int = 0", self.out)
+        self.assertIn("    tags: list = field(default_factory=list)", self.out)
+        # with a docstring the def line is a real header (no "..."), docstring indented below
+        self.assertIn('    def greet(self, loud: bool=False) -> str:\n        """Say hi."""', self.out)
+        self.assertNotIn("-> str: ...", self.out)
         self.assertIn("    @property", self.out)
         self.assertIn("    async def token(self): ...", self.out)
 
@@ -331,6 +373,22 @@ class TestSkimPython(unittest.TestCase):
     def test_syntax_error_falls_back(self):
         out = gitskim.skim_python("def broken(:\n  pass\n" * 40)
         self.assertIn("more lines", out)
+
+    def test_nested_class(self):
+        out = gitskim.skim_python('class Model:\n    class Meta:\n        ordering = ["x"]\n')
+        self.assertIn("class Model:\n    class Meta:\n        ...", out)
+
+    def test_long_default_truncated(self):
+        src = "class C:\n    x: dict = {" + ", ".join(f'"k{i}": {i}' for i in range(20)) + "}\n"
+        line = next(l for l in gitskim.skim_python(src).splitlines() if l.startswith("    x: dict = "))
+        self.assertTrue(line.endswith("…"))
+        self.assertEqual(len(line), len("    x: dict = ") + 60 + 1)
+
+    def test_module_constant_annotation_keeps_ellipsis(self):
+        self.assertIn("LIMIT: int = ...", gitskim.skim_python("LIMIT: int = 5\n"))
+
+    def test_bom_is_stripped(self):
+        self.assertEqual(gitskim.skim_python("\ufeffimport os\n"), "import os")
 
 
 TS_SAMPLE = """import { Foo } from './foo';
