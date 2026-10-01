@@ -643,7 +643,72 @@ def render_tree(entries: list) -> str:
     return "\n".join(lines)
 
 
-# (Task 10)
+def process_file(repo: Path, e: FileEntry, opts: Options) -> None:
+    """Fill content/tokens/lang/db_schema for one 'ok' entry. Mutates e."""
+    if e.status != "ok":
+        return
+    if opts.secret_scan and is_secret_path(e.path):
+        e.status, e.note = "secret", "sensitive filename"
+        return
+    text = (repo / e.path).read_text(encoding="utf-8", errors="replace")
+    if opts.secret_scan:
+        hit = find_secret(text)
+        if hit:
+            e.status, e.note = "secret", hit
+            return
+    e.lang = lang_for(e.path)
+    if is_db_changelog(e.path):
+        e.db_schema = skim_db_changelog(e.path, text)
+    if opts.full or Path(e.path).name.lower() == "readme.md":
+        e.content = text.rstrip("\n")
+    else:
+        e.content = skimmer_for(e.path)(text)
+    e.tokens = estimate_tokens(e.content)
+
+
+def _fence(content: str) -> str:
+    return "````" if "```" in content else "```"
+
+
+def render(name: str, branch: str, commit: str, entries: list, opts: Options,
+           diff: str = "", log: str = "") -> str:
+    included = [e for e in entries if e.status == "ok"]
+    tree = render_tree(entries)
+    total = sum(e.tokens for e in included) + estimate_tokens(tree)
+    today = _dt.date.today().isoformat()
+    mode = "full" if opts.full else "skim"
+    out = [
+        f"# {name}",
+        f"Branch {branch} @ {commit} · {today} · {len(included)}/{len(entries)} files · "
+        f"~{fmt_tokens(total)} tokens (est.) · mode: {mode}",
+        "",
+        "## Structure", "```", tree, "```", "",
+    ]
+    if included:
+        out += ["## Largest files", "", "| File | Commits | ~Tokens |", "|---|---:|---:|"]
+        for e in sorted(included, key=lambda e: -e.tokens)[:10]:
+            out.append(f"| {e.path} | {e.commits} | {fmt_tokens(e.tokens)} |")
+        out.append("")
+    db = [e for e in included if e.db_schema]
+    if db:
+        out.append("## Database schema")
+        out.append("")
+        for e in db:
+            out += [f"### {e.path}", *e.db_schema, ""]
+    out.append("## Files")
+    out.append("")
+    for e in included:
+        f = _fence(e.content)
+        out += [f"### {e.path} · {e.commits} commits · ~{fmt_tokens(e.tokens)} tokens",
+                f"{f}{e.lang}", e.content, f, ""]
+    if log or diff:
+        out.append("## Recent changes")
+        out.append("")
+        if log:
+            out += ["### git log", "```", log.rstrip("\n"), "```", ""]
+        if diff:
+            out += ["### git diff (working tree + staged)", "```diff", diff.rstrip("\n"), "```", ""]
+    return "\n".join(out).rstrip("\n") + "\n"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -671,9 +736,56 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def repo_meta(repo: Path) -> tuple:
+    try:
+        branch = run_git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        commit = run_git(repo, "rev-parse", "--short", "HEAD").strip()
+    except GitskimError:
+        branch, commit = "-", "-"
+    return branch, commit
+
+
 def main(argv: Optional[list] = None) -> int:
-    build_parser().parse_args(argv)
-    return 0
+    args = build_parser().parse_args(argv)
+    opts = Options(
+        full=args.full, include=args.include, exclude=args.exclude,
+        max_size_kb=args.max_size, default_ignore=not args.no_default_ignore,
+        untracked=args.untracked, sort=args.sort, secret_scan=not args.no_secret_scan,
+    )
+    tmp = None
+    try:
+        repo, tmp, name = resolve_source(args.source)
+        entries = collect_files(repo, opts)
+        rank_files(repo, entries, opts.sort)
+        for e in entries:
+            try:
+                process_file(repo, e, opts)
+            except OSError as ex:
+                e.status, e.note = "error", str(ex)
+                warn(f"cannot read {e.path}: {ex}")
+        for e in entries:
+            if e.status == "secret":
+                warn(f"skipped {e.path}: possible secret ({e.note})")
+        branch, commit = repo_meta(repo)
+        diff = log = ""
+        if args.diff:
+            diff = run_git(repo, "diff") + run_git(repo, "diff", "--cached")
+        if args.log:
+            log = run_git(repo, "log", f"-n{args.log}", "--oneline", "--no-decorate")
+        md = render(name, branch, commit, entries, opts, diff=diff, log=log)
+        if args.stdout:
+            sys.stdout.write(md)
+        else:
+            out_path = Path(args.output)
+            out_path.write_text(md, encoding="utf-8")
+            ok = sum(1 for e in entries if e.status == "ok")
+            warn(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est.)")
+        return 0
+    except GitskimError as ex:
+        warn(str(ex))
+        return 1
+    finally:
+        cleanup(tmp)
 
 
 if __name__ == "__main__":

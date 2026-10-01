@@ -607,5 +607,86 @@ class TestRenderTree(unittest.TestCase):
         ])
 
 
+class TestEndToEnd(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo({
+            "README.md": "# Demo\n\nSome text.\n\n```python\nprint(1)\n```\n",
+            "src/app.py": "import os\n\ndef main() -> int:\n    return 0\n",
+            "src/web.ts": "export function f() {\n  return 1;\n}\n",
+            "db/changelog/001.xml": LB_XML,
+            ".env": "SECRET=abc",
+            "config.py": "pw = " + '"' + "x" * 12 + '"' + "\nAPI_" + 'KEY = "' + "a" * 20 + '"\n',
+            "notes.txt": "\n".join(f"line {i}" for i in range(50)),
+        }, extra_commits={"src/app.py": "import os\n\ndef main() -> int:\n    return 1\n"}, case=self)
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(self.repo), "--stdout", *args],
+            capture_output=True, text=True,
+        )
+
+    def test_skim_mode_output(self):
+        res = self.run_cli()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = res.stdout
+        self.assertTrue(out.startswith(f"# {self.repo.name}\n"))
+        self.assertIn("mode: skim", out)
+        self.assertIn("## Structure", out)
+        self.assertIn("## Largest files", out)
+        self.assertIn("## Database schema", out)
+        self.assertIn("- 1/vf: createTable users(", out)
+        self.assertIn("## Files", out)
+        # ranking: app.py has 2 commits, comes first in Files
+        self.assertLess(out.index("### src/app.py · 2 commits"), out.index("### README.md"))
+        # README full even in skim mode, with 4-backtick fence because it contains ```
+        self.assertIn("Some text.", out)
+        self.assertIn("````markdown", out)
+        # python skimmed
+        self.assertIn("def main() -> int: ...", out)
+        self.assertNotIn("return 1", out)
+        # ts skimmed
+        self.assertIn("export function f() { ... }", out)
+        # fallback truncation
+        self.assertIn("… (20 more lines)", out)
+        # secrets
+        self.assertIn(".env  ⚠ skipped (possible secret)", out)
+        self.assertIn("config.py  ⚠ skipped (possible secret)", out)
+        self.assertNotIn("### .env", out)
+        self.assertNotIn("### config.py", out)
+        self.assertIn("possible secret", res.stderr)
+
+    def test_full_mode(self):
+        res = self.run_cli("--full")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("mode: full", res.stdout)
+        self.assertIn("return 1", res.stdout)
+
+    def test_no_secret_scan_includes_config(self):
+        res = self.run_cli("--no-secret-scan")
+        self.assertIn("### config.py", res.stdout)
+
+    def test_output_file(self):
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        out_path = out_dir / "out.md"
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(self.repo), "-o", str(out_path)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(out_path.exists())
+        self.assertIn(str(out_path), res.stderr)
+
+    def test_not_a_repo_exits_1(self):
+        plain = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), plain],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("not a git repository", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
