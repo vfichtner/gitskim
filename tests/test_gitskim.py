@@ -688,5 +688,29 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("not a git repository", res.stderr)
 
 
+class TestDiffAndLog(unittest.TestCase):
+    def test_log_and_diff_sections(self):
+        repo = make_repo({"a.py": "x = 1\n"}, extra_commits={"a.py": "x = 2\n"}, case=self)
+        (repo / "a.py").write_text("x = 3\n")
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(repo), "--stdout", "--log", "5", "--diff"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("## Recent changes", res.stdout)
+        self.assertIn("### git log", res.stdout)
+        self.assertIn("touch a.py", res.stdout)
+        self.assertIn("### git diff", res.stdout)
+        self.assertIn("+x = 3", res.stdout)
+
+    def test_no_section_without_flags(self):
+        repo = make_repo({"a.py": "x = 1\n"}, case=self)
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(repo), "--stdout"],
+            capture_output=True, text=True,
+        )
+        self.assertNotIn("## Recent changes", res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
