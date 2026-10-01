@@ -549,6 +549,10 @@ class TestSkimMarkdown(unittest.TestCase):
         out = gitskim.skim_markdown("just text\n")
         self.assertEqual(out, "just text")
 
+    def test_headings_inside_fences_ignored(self):
+        text = "# Real\n\n```python\n# not a heading\n## nor this\n```\n\n~~~\n# tilde fenced\n~~~\n\n## Also real\n"
+        self.assertEqual(gitskim.skim_markdown(text), "# Real\n## Also real")
+
 
 class TestRegistry(unittest.TestCase):
     def test_skimmer_for_ext(self):
@@ -688,6 +692,28 @@ class TestLiquibase(unittest.TestCase):
             "- 1/vf: createTable users(id uuid, email varchar(255))",
             "- 2/vf: addColumn users(age int)",
         ])
+
+
+class TestRender(unittest.TestCase):
+    def test_empty_file_has_no_files_entry(self):
+        entries = [
+            gitskim.FileEntry("pkg/__init__.py", 0, commits=1, lang="python", content=""),
+            gitskim.FileEntry("pkg/a.py", 10, commits=1, lang="python", content="def f(): ...", tokens=3),
+        ]
+        out = gitskim.render("demo", "main", "abc1234", entries, gitskim.Options())
+        self.assertNotIn("### pkg/__init__.py", out)
+        self.assertIn("### pkg/a.py · 1 commit · ~3 tokens", out)
+        self.assertIn("2/2 files", out)                 # still counted
+        self.assertIn("├── __init__.py", out)           # still in the tree
+
+    def test_commit_plural(self):
+        entries = [gitskim.FileEntry("a.py", 1, commits=2, content="x = 1", tokens=1)]
+        self.assertIn("### a.py · 2 commits", gitskim.render("d", "main", "abc", entries, gitskim.Options()))
+
+    def test_tree_note_megabytes(self):
+        big = gitskim.FileEntry("x.bin", 3 * 1024 * 1024 + 200 * 1024, status="too_large")
+        self.assertEqual(gitskim._tree_note(big), "  (skipped, 3.2 MB)")
+        self.assertEqual(gitskim._tree_note(gitskim.FileEntry("y.bin", 300 * 1024, status="too_large")), "  (skipped, 300 KB)")
 
 
 class TestRenderTree(unittest.TestCase):

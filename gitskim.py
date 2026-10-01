@@ -443,10 +443,19 @@ def skim_regex(text: str, max_lines: int = 200) -> str:
 
 
 HEADING_RE = re.compile(r"^#{1,6}\s")
+FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 
 
 def skim_markdown(text: str) -> str:
-    heads = [l.rstrip() for l in text.splitlines() if HEADING_RE.match(l)]
+    """Headings only; '#' lines inside ``` / ~~~ fences are code, not headings."""
+    heads = []
+    in_fence = False
+    for line in text.splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence and HEADING_RE.match(line):
+            heads.append(line.rstrip())
     return "\n".join(heads) if heads else skim_fallback(text)
 
 
@@ -654,7 +663,8 @@ def skim_db_changelog(rel: str, text: str) -> list:
 
 def _tree_note(e: FileEntry) -> str:
     if e.status == "too_large":
-        return f"  (skipped, {max(1, e.size // 1024)} KB)"
+        kb = e.size / 1024
+        return f"  (skipped, {kb / 1024:.1f} MB)" if kb >= 1024 else f"  (skipped, {max(1, int(kb))} KB)"
     if e.status == "binary":
         return "  (binary)"
     if e.status == "secret":
@@ -714,6 +724,10 @@ def _fence(content: str) -> str:
     return "````" if "```" in content else "```"
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
 def render(name: str, branch: str, commit: str, entries: list, opts: Options,
            diff: str = "", log: str = "") -> str:
     included = [e for e in entries if e.status == "ok"]
@@ -742,8 +756,10 @@ def render(name: str, branch: str, commit: str, entries: list, opts: Options,
     out.append("## Files")
     out.append("")
     for e in included:
+        if not e.content.strip():         # empty files: tree + counts only, no empty code block
+            continue
         f = _fence(e.content)
-        out += [f"### {e.path} · {e.commits} commits · ~{fmt_tokens(e.tokens)} tokens",
+        out += [f"### {e.path} · {_plural(e.commits, 'commit')} · ~{fmt_tokens(e.tokens)} tokens",
                 f"{f}{e.lang}", e.content, f, ""]
     if log or diff:
         out.append("## Recent changes")

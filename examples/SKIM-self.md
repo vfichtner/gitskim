@@ -1,5 +1,5 @@
 # gitskim
-Branch main @ 0c21edd · 2026-10-01 · 8/8 files · ~4.4k tokens (est.) · mode: skim
+Branch main @ 3586424 · 2026-10-01 · 8/8 files · ~4.4k tokens (est.) · mode: skim
 
 ## Structure
 ```
@@ -20,18 +20,18 @@ Branch main @ 0c21edd · 2026-10-01 · 8/8 files · ~4.4k tokens (est.) · mode:
 
 | File | Commits | ~Tokens |
 |---|---:|---:|
-| README.md | 0 | 1.3k |
-| gitskim.py | 13 | 1.2k |
-| tests/test_gitskim.py | 14 | 1.1k |
-| docs/plans/2026-10-01-gitskim-implementation.md | 1 | 391 |
+| tests/test_gitskim.py | 16 | 1.3k |
+| README.md | 1 | 1.3k |
+| gitskim.py | 15 | 1.3k |
 | LICENSE | 1 | 267 |
-| docs/plans/2026-10-01-gitskim-design.md | 1 | 141 |
+| docs/plans/2026-10-01-gitskim-implementation.md | 1 | 148 |
+| docs/plans/2026-10-01-gitskim-design.md | 1 | 64 |
 | .gitignore | 1 | 9 |
 | tests/__init__.py | 1 | 0 |
 
 ## Files
 
-### tests/test_gitskim.py · 14 commits · ~1.1k tokens
+### tests/test_gitskim.py · 16 commits · ~1.3k tokens
 ```python
 import shutil
 import subprocess
@@ -118,7 +118,15 @@ class TestSkimPython(unittest.TestCase):
 
 TS_SAMPLE = ...
 JAVA_SAMPLE = ...
+GO_SAMPLE = ...
+RUST_SAMPLE = ...
 class TestSkimRegex(unittest.TestCase):
+    def test_let_const_var_only_at_top_level(self): ...
+    def test_closing_brace_lines_skipped_and_allman_attached(self): ...
+    def test_preprocessor_and_attributes_kept_comments_dropped(self): ...
+    def test_kotlin_declarations_and_go_select(self): ...
+    def test_go_fixture(self): ...
+    def test_rust_fixture(self): ...
     def test_typescript_keeps_declarations_drops_bodies(self): ...
     def test_java_keeps_annotations_and_methods(self): ...
     def test_caps_output(self): ...
@@ -126,6 +134,7 @@ class TestSkimRegex(unittest.TestCase):
 class TestSkimMarkdown(unittest.TestCase):
     def test_headings_only(self): ...
     def test_no_headings_falls_back(self): ...
+    def test_headings_inside_fences_ignored(self): ...
 
 class TestRegistry(unittest.TestCase):
     def test_skimmer_for_ext(self): ...
@@ -139,7 +148,16 @@ class TestLiquibase(unittest.TestCase):
     def test_xml(self): ...
     def test_xml_parse_error_returns_empty(self): ...
     def test_sql(self): ...
+    def test_sql_statement_without_semicolon(self): ...
+    def test_xml_master_includes(self): ...
+    def test_xml_generic_op_with_table_attrs(self): ...
+    def test_yaml_unknown_op(self): ...
     def test_yaml(self): ...
+
+class TestRender(unittest.TestCase):
+    def test_empty_file_has_no_files_entry(self): ...
+    def test_commit_plural(self): ...
+    def test_tree_note_megabytes(self): ...
 
 class TestRenderTree(unittest.TestCase):
     def test_tree_with_notes(self): ...
@@ -158,8 +176,8 @@ class TestDiffAndLog(unittest.TestCase):
     def test_no_section_without_flags(self): ...
 ```
 
-### gitskim.py · 13 commits · ~1.2k tokens
-```python
+### gitskim.py · 15 commits · ~1.3k tokens
+````python
 """gitskim – skim a git repository into one compact Markdown file for LLM context."""
 from __future__ import annotations
 import argparse
@@ -265,14 +283,19 @@ def skim_python(text: str) -> str:
 
 _MODIFIERS = ...
 _KEYWORDS = ...
+_TOP_ONLY = ...
 SIG_RE = ...
+TOP_RE = ...
 ANNOTATION_RE = ...
+PREPROC_RE = ...
 CONTROL_RE = ...
 def skim_regex(text: str, max_lines: int=200) -> str:
     """Heuristic skimmer for brace languages: declarations and annotations, no bodies."""
 
 HEADING_RE = ...
-def skim_markdown(text: str) -> str: ...
+FENCE_RE = ...
+def skim_markdown(text: str) -> str:
+    """Headings only; '#' lines inside ``` / ~~~ fences are code, not headings."""
 
 LANG_BY_EXT = ...
 LANG_BY_NAME = ...
@@ -303,6 +326,7 @@ def skim_liquibase_sql(text: str, max_len: int=200) -> list:
     """One line per --changeset with its DDL statements, whitespace squashed."""
 
 _YAML_OPS = ...
+_YAML_STRUCTURAL = ...
 def skim_liquibase_yaml(text: str) -> list:
     """Very rough YAML changelog reader: changeSet id/author, op, tableName, columns."""
 
@@ -318,6 +342,8 @@ def process_file(repo: Path, e: FileEntry, opts: Options) -> None:
 
 def _fence(content: str) -> str: ...
 
+def _plural(n: int, word: str) -> str: ...
+
 def render(name: str, branch: str, commit: str, entries: list, opts: Options, diff: str='', log: str='') -> str: ...
 
 def build_parser() -> argparse.ArgumentParser: ...
@@ -325,9 +351,9 @@ def build_parser() -> argparse.ArgumentParser: ...
 def repo_meta(repo: Path) -> tuple: ...
 
 def main(argv: Optional[list]=None) -> int: ...
-```
+````
 
-### .gitignore · 1 commits · ~9 tokens
+### .gitignore · 1 commit · ~9 tokens
 ```
 __pycache__/
 *.pyc
@@ -335,7 +361,7 @@ __pycache__/
 .DS_Store
 ```
 
-### LICENSE · 1 commits · ~267 tokens
+### LICENSE · 1 commit · ~267 tokens
 ```
 MIT License
 
@@ -360,78 +386,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### docs/plans/2026-10-01-gitskim-design.md · 1 commits · ~141 tokens
-```markdown
-# gitskim – Design (v1)
-## Was es ist
-## Nicht-Ziele (v1)
-## CLI
-## Architektur
-## Dateiauswahl
-## Ranking
-## Skim-Modus (Default)
-## Liquibase-/DB-Skimmer
-## Secret-Scan
-## Output `SKIM.md`
-# <repo-name>
-## Structure          ASCII-Baum, Skips mit Vermerk
-## Largest files      Top 10 nach geschaetzten Tokens
-## Database schema    nur wenn Liquibase/SQL-Migrationen gefunden
-## Files              pro Datei: ### path · 12 commits · ~400 tokens, Codeblock
-## Recent changes     nur bei --diff / --log
-## Fehlerbehandlung
-## Tests
-## Repo-Layout
-## Spaeter (nicht v1)
-```
-
-### docs/plans/2026-10-01-gitskim-implementation.md · 1 commits · ~391 tokens
-```markdown
-# gitskim v1 Implementation Plan
-## Task 1: Scaffold, CLI skeleton, test harness
-# ── Errors & options ──────────────────────────────────────────────────────────
-# ── Git helpers ───────────────────────────────────────────────────────────────
-# (Task 2)
-# ── File collection ───────────────────────────────────────────────────────────
-# (Task 3)
-# ── Ranking ───────────────────────────────────────────────────────────────────
-# (Task 4)
-# ── Tokens & secrets ──────────────────────────────────────────────────────────
-# (Task 5)
-# ── Skimmers ──────────────────────────────────────────────────────────────────
-# (Tasks 6, 7)
-# ── Database changelogs ───────────────────────────────────────────────────────
-# (Task 8)
-# ── Rendering ─────────────────────────────────────────────────────────────────
-# (Tasks 9, 10)
-# ── CLI ───────────────────────────────────────────────────────────────────────
-## Task 2: Git helpers and `resolve_source`
-## Task 3: `collect_files` with filter chain
-## Task 4: `rank_files` by change frequency
-## Task 5: Token estimate and secret scan
-## Task 6: Python skimmer via `ast`
-## Task 7: Regex skimmer, Markdown skimmer, skimmer registry
-# Lines that start a declaration in C-like / Go / Rust / Java / C# / TS code.
-## Task 8: Liquibase / SQL changelog skimmer
-## Task 9: Directory tree rendering
-## Task 10: `process_file`, `render`, `main` wiring (end to end)
-## Task 11: `--diff` and `--log`
-## Task 12: README, dogfooding example, push
-# gitskim
-## Usage
-## Output
-## How it compares
-## Limitations
-## Development
-## Done criteria
-```
-
-### tests/__init__.py · 1 commits · ~0 tokens
-```python
-
-```
-
-### README.md · 0 commits · ~1.3k tokens
+### README.md · 1 commit · ~1.3k tokens
 ```markdown
 # gitskim
 
@@ -523,4 +478,41 @@ If you need exact token counts, many languages with precise parsing, or an MCP s
     python3 -m unittest -v
 
 MIT License.
+```
+
+### docs/plans/2026-10-01-gitskim-design.md · 1 commit · ~64 tokens
+```markdown
+# gitskim – Design (v1)
+## Was es ist
+## Nicht-Ziele (v1)
+## CLI
+## Architektur
+## Dateiauswahl
+## Ranking
+## Skim-Modus (Default)
+## Liquibase-/DB-Skimmer
+## Secret-Scan
+## Output `SKIM.md`
+## Fehlerbehandlung
+## Tests
+## Repo-Layout
+## Spaeter (nicht v1)
+```
+
+### docs/plans/2026-10-01-gitskim-implementation.md · 1 commit · ~148 tokens
+```markdown
+# gitskim v1 Implementation Plan
+## Task 1: Scaffold, CLI skeleton, test harness
+## Task 2: Git helpers and `resolve_source`
+## Task 3: `collect_files` with filter chain
+## Task 4: `rank_files` by change frequency
+## Task 5: Token estimate and secret scan
+## Task 6: Python skimmer via `ast`
+## Task 7: Regex skimmer, Markdown skimmer, skimmer registry
+## Task 8: Liquibase / SQL changelog skimmer
+## Task 9: Directory tree rendering
+## Task 10: `process_file`, `render`, `main` wiring (end to end)
+## Task 11: `--diff` and `--log`
+## Task 12: README, dogfooding example, push
+## Done criteria
 ```
