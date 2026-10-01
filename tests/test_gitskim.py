@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import shutil
 import subprocess
 import sys
@@ -659,6 +661,11 @@ class TestLiquibase(unittest.TestCase):
             "- vf:2: ALTER TABLE users ADD COLUMN age int; CREATE UNIQUE INDEX ix_users_email ON users(email)",
         ])
 
+    def test_sql_without_changeset_markers_uses_file_stem(self):
+        text = "CREATE TABLE users (id int);\nINSERT INTO users VALUES (1);\nCREATE INDEX ix ON users(id);\n"
+        self.assertEqual(gitskim.skim_db_changelog("db/migration/V1__init.sql", text),
+                         ["- V1__init: CREATE TABLE users (id int); CREATE INDEX ix ON users(id)"])
+
     def test_sql_statement_without_semicolon(self):
         text = "--changeset vf:1\nCREATE TABLE t (id int)\n--changeset vf:2\nCREATE TABLE u (id int)\n"
         self.assertEqual(gitskim.skim_db_changelog("db/changelog/a.sql", text),
@@ -705,6 +712,11 @@ class TestRender(unittest.TestCase):
         self.assertIn("### pkg/a.py · 1 commit · ~3 tokens", out)
         self.assertIn("2/2 files", out)                 # still counted
         self.assertIn("├── __init__.py", out)           # still in the tree
+
+    def test_fence_longer_than_longest_backtick_run(self):
+        self.assertEqual(gitskim._fence("plain"), "```")
+        self.assertEqual(gitskim._fence("a ``` b"), "````")
+        self.assertEqual(gitskim._fence("a ``` b ```` c"), "`````")
 
     def test_commit_plural(self):
         entries = [gitskim.FileEntry("a.py", 1, commits=2, content="x = 1", tokens=1)]
@@ -805,6 +817,11 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(out_path.exists())
         self.assertIn(str(out_path), res.stderr)
+
+    def test_negative_max_size_rejected(self):
+        res = self.run_cli("--max-size", "-1")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("max-size", res.stderr)
 
     def test_not_a_repo_exits_1(self):
         plain = tempfile.mkdtemp()

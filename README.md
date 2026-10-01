@@ -60,7 +60,7 @@ Skipped files are listed in the tree with a warning marker and reported on stder
     ## Files            one section per file, most-changed first
     ## Recent changes   only with --diff / --log
 
-`README.md` is always included in full, even in skim mode. See [`examples/SKIM-self.md`](examples/SKIM-self.md) for gitskim applied to itself.
+Every `README.md` is included in full in skim mode (as long as it is under `--max-size`); a very large README can dominate the token budget. See [`examples/SKIM-self.md`](examples/SKIM-self.md) for gitskim applied to itself.
 
 ## How it compares
 
@@ -82,6 +82,8 @@ If you need exact token counts, many languages with precise parsing, or an MCP s
 - Secret detection is a handful of patterns, not a security tool. Review output before sharing.
 - Remote clones are shallow (`--depth 1`), so change-frequency ranking degrades to path order for them.
 - Change-frequency ranking does not follow renames; a renamed file starts counting from zero.
+- Change-frequency ranking looks at the last 500 commits only.
+- On Windows, prefer `-o FILE` over `--stdout` on legacy consoles (the tree uses UTF-8 box characters); temporary clones may leave read-only files behind in `%TEMP%`.
 
 ## Development
 

@@ -9,6 +9,7 @@ import argparse
 import ast
 import datetime as _dt
 import fnmatch
+import os
 import re
 import shutil
 import subprocess
@@ -570,10 +571,13 @@ SQL_CHANGESET_RE = re.compile(r"^\s*--\s*changeset\s+(\S+)", re.I)
 SQL_DDL_RE = re.compile(r"^(CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX|VIEW)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX))\b", re.I)
 
 
-def skim_liquibase_sql(text: str, max_len: int = 200) -> list:
-    """One line per --changeset with its DDL statements, whitespace squashed."""
+def skim_liquibase_sql(text: str, max_len: int = 200, default_label: str = "?") -> list:
+    """One line per --changeset with its DDL statements, whitespace squashed.
+
+    Statements before any --changeset marker (e.g. Flyway files) are labelled default_label.
+    """
     out = []
-    current = "?"
+    current = default_label
     ops: list = []
     buf: list = []
 
@@ -655,7 +659,7 @@ def skim_db_changelog(rel: str, text: str) -> list:
     if ext == ".xml":
         return skim_liquibase_xml(text)
     if ext == ".sql":
-        return skim_liquibase_sql(text)
+        return skim_liquibase_sql(text, default_label=Path(rel).stem)
     return skim_liquibase_yaml(text)
 
 
@@ -721,7 +725,9 @@ def process_file(repo: Path, e: FileEntry, opts: Options) -> None:
 
 
 def _fence(content: str) -> str:
-    return "````" if "```" in content else "```"
+    """Backtick fence one longer than the longest backtick run in content (min 3)."""
+    longest = max((len(m) for m in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def _plural(n: int, word: str) -> str:
@@ -774,6 +780,13 @@ def render(name: str, branch: str, commit: str, entries: list, opts: Options,
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
+def non_negative_int(value: str) -> int:
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gitskim",
@@ -785,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full", action="store_true", help="full file contents instead of signatures")
     p.add_argument("--include", action="append", default=[], metavar="GLOB", help="only files matching GLOB (repeatable)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB", help="skip files matching GLOB (repeatable)")
-    p.add_argument("--max-size", type=int, default=100, metavar="KB", help="skip files larger than KB (default: 100)")
+    p.add_argument("--max-size", type=non_negative_int, default=100, metavar="KB", help="skip files larger than KB (default: 100)")
     p.add_argument("--no-default-ignore", action="store_true", help="disable built-in ignore list")
     p.add_argument("--untracked", action="store_true", help="include untracked (non-ignored) files")
     p.add_argument("--sort", choices=["changes", "path"], default="changes", help="file order (default: changes)")
@@ -794,6 +807,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-secret-scan", action="store_true", help="disable secret heuristics")
     p.add_argument("--version", action="version", version=f"gitskim {__version__}")
     return p
+
+
+LARGE_FILE_TOKENS = 8000
 
 
 def repo_meta(repo: Path) -> tuple:
@@ -826,15 +842,26 @@ def main(argv: Optional[list] = None) -> int:
         for e in entries:
             if e.status == "secret":
                 warn(f"skipped {e.path}: possible secret ({e.note})")
+            elif e.status == "ok" and e.tokens > LARGE_FILE_TOKENS:
+                warn(f"{e.path} is large (~{fmt_tokens(e.tokens)} tokens est.)")
         branch, commit = repo_meta(repo)
         diff = log = ""
-        if args.diff:
-            diff = run_git(repo, "diff") + run_git(repo, "diff", "--cached")
-        if args.log:
-            log = run_git(repo, "log", f"-n{args.log}", "--oneline", "--no-decorate")
+        try:                                  # both fail on a repo without commits
+            if args.diff:
+                diff = run_git(repo, "diff") + run_git(repo, "diff", "--cached")
+            if args.log:
+                log = run_git(repo, "log", f"-n{args.log}", "--oneline", "--no-decorate")
+        except GitskimError:
+            pass
         md = render(name, branch, commit, entries, opts, diff=diff, log=log)
         if args.stdout:
-            sys.stdout.write(md)
+            try:
+                sys.stdout.write(md)
+                sys.stdout.flush()
+            except BrokenPipeError:           # e.g. `| head`: exit quietly
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+                return 0
         else:
             out_path = Path(args.output)
             out_path.write_text(md, encoding="utf-8")
