@@ -1,12 +1,8 @@
 # gitskim
-Branch main @ 3586424 · 2026-10-01 · 8/8 files · ~4.4k tokens (est.) · mode: skim
+Branch main @ e235b5d · 2026-10-01 · 6/6 files · ~4.3k tokens (est.) · mode: skim
 
 ## Structure
 ```
-├── docs/
-│   └── plans/
-│       ├── 2026-10-01-gitskim-design.md
-│       └── 2026-10-01-gitskim-implementation.md
 ├── tests/
 │   ├── __init__.py
 │   └── test_gitskim.py
@@ -20,19 +16,18 @@ Branch main @ 3586424 · 2026-10-01 · 8/8 files · ~4.4k tokens (est.) · mode:
 
 | File | Commits | ~Tokens |
 |---|---:|---:|
-| tests/test_gitskim.py | 16 | 1.3k |
-| README.md | 1 | 1.3k |
-| gitskim.py | 15 | 1.3k |
+| README.md | 2 | 1.4k |
+| tests/test_gitskim.py | 17 | 1.3k |
+| gitskim.py | 16 | 1.3k |
 | LICENSE | 1 | 267 |
-| docs/plans/2026-10-01-gitskim-implementation.md | 1 | 148 |
-| docs/plans/2026-10-01-gitskim-design.md | 1 | 64 |
 | .gitignore | 1 | 9 |
 | tests/__init__.py | 1 | 0 |
 
 ## Files
 
-### tests/test_gitskim.py · 16 commits · ~1.3k tokens
+### tests/test_gitskim.py · 17 commits · ~1.3k tokens
 ```python
+from __future__ import annotations
 import shutil
 import subprocess
 import sys
@@ -148,6 +143,7 @@ class TestLiquibase(unittest.TestCase):
     def test_xml(self): ...
     def test_xml_parse_error_returns_empty(self): ...
     def test_sql(self): ...
+    def test_sql_without_changeset_markers_uses_file_stem(self): ...
     def test_sql_statement_without_semicolon(self): ...
     def test_xml_master_includes(self): ...
     def test_xml_generic_op_with_table_attrs(self): ...
@@ -156,6 +152,7 @@ class TestLiquibase(unittest.TestCase):
 
 class TestRender(unittest.TestCase):
     def test_empty_file_has_no_files_entry(self): ...
+    def test_fence_longer_than_longest_backtick_run(self): ...
     def test_commit_plural(self): ...
     def test_tree_note_megabytes(self): ...
 
@@ -169,6 +166,7 @@ class TestEndToEnd(unittest.TestCase):
     def test_full_mode(self): ...
     def test_no_secret_scan_includes_config(self): ...
     def test_output_file(self): ...
+    def test_negative_max_size_rejected(self): ...
     def test_not_a_repo_exits_1(self): ...
 
 class TestDiffAndLog(unittest.TestCase):
@@ -176,7 +174,7 @@ class TestDiffAndLog(unittest.TestCase):
     def test_no_section_without_flags(self): ...
 ```
 
-### gitskim.py · 15 commits · ~1.3k tokens
+### gitskim.py · 16 commits · ~1.3k tokens
 ````python
 """gitskim – skim a git repository into one compact Markdown file for LLM context."""
 from __future__ import annotations
@@ -184,6 +182,7 @@ import argparse
 import ast
 import datetime as _dt
 import fnmatch
+import os
 import re
 import shutil
 import subprocess
@@ -322,7 +321,7 @@ def skim_liquibase_xml(text: str) -> list: ...
 
 SQL_CHANGESET_RE = ...
 SQL_DDL_RE = ...
-def skim_liquibase_sql(text: str, max_len: int=200) -> list:
+def skim_liquibase_sql(text: str, max_len: int=200, default_label: str='?') -> list:
     """One line per --changeset with its DDL statements, whitespace squashed."""
 
 _YAML_OPS = ...
@@ -340,53 +339,24 @@ def render_tree(entries: list) -> str:
 def process_file(repo: Path, e: FileEntry, opts: Options) -> None:
     """Fill content/tokens/lang/db_schema for one 'ok' entry. Mutates e."""
 
-def _fence(content: str) -> str: ...
+def _fence(content: str) -> str:
+    """Backtick fence one longer than the longest backtick run in content (min 3)."""
 
 def _plural(n: int, word: str) -> str: ...
 
 def render(name: str, branch: str, commit: str, entries: list, opts: Options, diff: str='', log: str='') -> str: ...
 
+def non_negative_int(value: str) -> int: ...
+
 def build_parser() -> argparse.ArgumentParser: ...
 
+LARGE_FILE_TOKENS = ...
 def repo_meta(repo: Path) -> tuple: ...
 
 def main(argv: Optional[list]=None) -> int: ...
 ````
 
-### .gitignore · 1 commit · ~9 tokens
-```
-__pycache__/
-*.pyc
-/SKIM.md
-.DS_Store
-```
-
-### LICENSE · 1 commit · ~267 tokens
-```
-MIT License
-
-Copyright (c) 2026 Vitali Fichtner
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-### README.md · 1 commit · ~1.3k tokens
+### README.md · 2 commits · ~1.4k tokens
 ```markdown
 # gitskim
 
@@ -450,7 +420,7 @@ Skipped files are listed in the tree with a warning marker and reported on stder
     ## Files            one section per file, most-changed first
     ## Recent changes   only with --diff / --log
 
-`README.md` is always included in full, even in skim mode. See [`examples/SKIM-self.md`](examples/SKIM-self.md) for gitskim applied to itself.
+Every `README.md` is included in full in skim mode (as long as it is under `--max-size`); a very large README can dominate the token budget. See [`examples/SKIM-self.md`](examples/SKIM-self.md) for gitskim applied to itself.
 
 ## How it compares
 
@@ -472,6 +442,8 @@ If you need exact token counts, many languages with precise parsing, or an MCP s
 - Secret detection is a handful of patterns, not a security tool. Review output before sharing.
 - Remote clones are shallow (`--depth 1`), so change-frequency ranking degrades to path order for them.
 - Change-frequency ranking does not follow renames; a renamed file starts counting from zero.
+- Change-frequency ranking looks at the last 500 commits only.
+- On Windows, prefer `-o FILE` over `--stdout` on legacy consoles (the tree uses UTF-8 box characters); temporary clones may leave read-only files behind in `%TEMP%`.
 
 ## Development
 
@@ -480,39 +452,35 @@ If you need exact token counts, many languages with precise parsing, or an MCP s
 MIT License.
 ```
 
-### docs/plans/2026-10-01-gitskim-design.md · 1 commit · ~64 tokens
-```markdown
-# gitskim – Design (v1)
-## Was es ist
-## Nicht-Ziele (v1)
-## CLI
-## Architektur
-## Dateiauswahl
-## Ranking
-## Skim-Modus (Default)
-## Liquibase-/DB-Skimmer
-## Secret-Scan
-## Output `SKIM.md`
-## Fehlerbehandlung
-## Tests
-## Repo-Layout
-## Spaeter (nicht v1)
+### .gitignore · 1 commit · ~9 tokens
+```
+__pycache__/
+*.pyc
+/SKIM.md
+.DS_Store
 ```
 
-### docs/plans/2026-10-01-gitskim-implementation.md · 1 commit · ~148 tokens
-```markdown
-# gitskim v1 Implementation Plan
-## Task 1: Scaffold, CLI skeleton, test harness
-## Task 2: Git helpers and `resolve_source`
-## Task 3: `collect_files` with filter chain
-## Task 4: `rank_files` by change frequency
-## Task 5: Token estimate and secret scan
-## Task 6: Python skimmer via `ast`
-## Task 7: Regex skimmer, Markdown skimmer, skimmer registry
-## Task 8: Liquibase / SQL changelog skimmer
-## Task 9: Directory tree rendering
-## Task 10: `process_file`, `render`, `main` wiring (end to end)
-## Task 11: `--diff` and `--log`
-## Task 12: README, dogfooding example, push
-## Done criteria
+### LICENSE · 1 commit · ~267 tokens
+```
+MIT License
+
+Copyright (c) 2026 Vitali Fichtner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
