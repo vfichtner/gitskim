@@ -170,10 +170,12 @@ def is_binary(path: Path) -> bool:
 def collect_files(repo: Path, opts: Options) -> list:
     """List candidate files via git ls-files and apply the filter chain.
 
-    Order: --exclude always wins; an explicit --include match bypasses the
-    built-in ignore list (explicit beats default); otherwise the built-in
-    ignore list applies. Filtered-out files are dropped. Too-large, binary and
-    unreadable files are kept with a status so they still appear in the tree.
+    Order: --exclude always wins. IGNORE_DIRS (node_modules, .venv, dist, ...)
+    apply whenever the built-in ignore is on, even under --include; only
+    --no-default-ignore disables them. An explicit --include match bypasses the
+    DEFAULT_IGNORE file patterns (lockfiles, images, ...); otherwise those
+    apply too. Filtered-out files are dropped. Too-large, binary and unreadable
+    files are kept with a status so they still appear in the tree.
     """
     args = ["ls-files", "-z"]
     if opts.untracked:
@@ -183,12 +185,12 @@ def collect_files(repo: Path, opts: Options) -> list:
     for rel in sorted(set(filter(None, out.split("\0")))):   # set: unmerged entries repeat
         if opts.exclude and matches_any(rel, opts.exclude):
             continue
+        if opts.default_ignore and in_ignored_dir(rel):
+            continue
         if opts.include:
             if not matches_any(rel, opts.include):
                 continue
-        elif opts.default_ignore and (
-            in_ignored_dir(rel) or matches_any(rel, DEFAULT_IGNORE, casefold=True)
-        ):
+        elif opts.default_ignore and matches_any(rel, DEFAULT_IGNORE, casefold=True):
             continue
         p = repo / rel
         if not p.is_file():          # submodule dirs, deleted-but-indexed files

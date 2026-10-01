@@ -179,6 +179,12 @@ class TestCollectFiles(unittest.TestCase):
         kept = gitskim.collect_files(self.repo, gitskim.Options(default_ignore=False))
         self.assertIn("pkg/node_modules/x.js", self.paths(kept))
 
+    def test_include_keeps_ignore_dirs_active(self):
+        inc = gitskim.collect_files(self.repo, gitskim.Options(include=["*.js"]))
+        self.assertEqual(self.paths(inc), [])          # dist/ and node_modules/ stay ignored
+        raw = gitskim.collect_files(self.repo, gitskim.Options(include=["*.js"], default_ignore=False))
+        self.assertEqual(self.paths(raw), ["dist/bundle.js", "pkg/node_modules/x.js"])
+
     def test_untracked_files_only_with_flag(self):
         (self.repo / "new.txt").write_text("new")
         default = gitskim.collect_files(self.repo, gitskim.Options())
