@@ -188,5 +188,30 @@ class TestCollectFiles(unittest.TestCase):
         self.assertIn("src/app.py", self.paths(with_flag))
 
 
+class TestRankFiles(unittest.TestCase):
+    def test_sorted_by_commit_count_then_path(self):
+        repo = make_repo(
+            {"a.txt": "1", "b.txt": "1", "c.txt": "1"},
+            extra_commits={"c.txt": "2", "b.txt": "2", "c.txt ": "3"},
+            case=self,
+        )
+        # note: "c.txt " with trailing space is a different file; harmless, tests robustness.
+        # One more commit on c.txt so counts are c=3, b=2, a=1, "c.txt "=1 (dict keys can't repeat).
+        (repo / "c.txt").write_text("3", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "touch c.txt again")
+        entries = gitskim.collect_files(repo, gitskim.Options())
+        gitskim.rank_files(repo, entries, "changes")
+        self.assertEqual([e.path for e in entries], ["c.txt", "b.txt", "a.txt", "c.txt "])
+        self.assertEqual(next(e for e in entries if e.path == "c.txt").commits, 3)
+        self.assertEqual(next(e for e in entries if e.path == "c.txt ").commits, 1)
+
+    def test_sort_path(self):
+        repo = make_repo({"b.txt": "1", "a.txt": "1"}, extra_commits={"b.txt": "2"}, case=self)
+        entries = gitskim.collect_files(repo, gitskim.Options())
+        gitskim.rank_files(repo, entries, "path")
+        self.assertEqual([e.path for e in entries], ["a.txt", "b.txt"])
+
+
 if __name__ == "__main__":
     unittest.main()

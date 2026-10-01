@@ -208,7 +208,20 @@ def collect_files(repo: Path, opts: Options) -> list:
 
 # ── Ranking ───────────────────────────────────────────────────────────────────
 
-# (Task 4)
+def rank_files(repo: Path, entries: list, sort: str = "changes", max_commits: int = 500) -> list:
+    """Sort entries in place. 'changes' = most-committed first (LLMs read top-down)."""
+    if sort == "changes":
+        try:
+            out = run_git(repo, "log", "--name-only", "--format=", f"-n{max_commits}")
+        except GitskimError:          # e.g. repo without commits
+            out = ""
+        counts = Counter(line for line in out.splitlines() if line)
+        for e in entries:
+            e.commits = counts.get(e.path, 0)
+        entries.sort(key=lambda e: (-e.commits, e.path))
+    else:
+        entries.sort(key=lambda e: e.path)
+    return entries
 
 
 # ── Tokens & secrets ──────────────────────────────────────────────────────────
