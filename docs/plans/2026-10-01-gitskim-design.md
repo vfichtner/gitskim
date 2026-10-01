@@ -1,6 +1,6 @@
 # gitskim – Design (v1)
 
-*Datum: 2026-10-01 · Status: validiert im Brainstorming, bereit fuer Implementierungsplan*
+*Datum: 2026-10-01 · Status: v1 implementiert (81 Tests), Abweichungen zum Brainstorming inline markiert*
 
 ## Was es ist
 
@@ -57,7 +57,11 @@ Reihenfolge der Filterkette (billig vor teuer):
    (`*.min.js`, `*.min.css`, `*.map`), Binaer-Endungen (`png jpg gif ico pdf
    woff* ttf zip gz pyc so dll exe`), Verzeichnisse `dist/ build/ vendor/
    node_modules/ __pycache__/`. Abschaltbar via `--no-default-ignore`.
-2. `--exclude` Globs, dann `--include` (wenn gesetzt, muss eines passen).
+2. `--exclude` Globs (gewinnt immer), dann `--include`: wenn gesetzt, muss eines
+   passen. Ein expliziter Include ueberstimmt die Default-Ignore-*Dateimuster*
+   (Lockfiles, Bilder …), nicht aber die ignorierten *Verzeichnisse*
+   (`node_modules`, `.venv`, `dist` …). Nur `--no-default-ignore` hebt beides auf.
+   (Entscheidung 01.10. nach Code-Review; urspruenglich: Default-Ignore vor Include.)
 3. `--max-size` KB, Default 100. Groessere Dateien nur im Baum mit Vermerk.
 4. **Binaer-Sniff:** erste 8 KB, Null-Byte → nur im Baum.
 
@@ -109,7 +113,9 @@ ist. Flyway/Alembic/Django-Migrationen koennen spaeter denselben SQL-Pfad nutzen
 Immer an, `--no-secret-scan` zum Abschalten. ~8 Regexe: AWS-Keys, `ghp_`/`gho_`,
 Slack-Tokens, `-----BEGIN … PRIVATE KEY-----`, Google-API-Keys, JWTs, Stripe
 `sk_live_`, generisch `(api[_-]?key|secret|password)\s*[=:]\s*["'][^"']{8,}`.
-Pfad-Regel: `.env*`, `*.pem`, `*.key`, `id_rsa*` werden nie gelesen.
+Pfad-Regel: `.env*`, `*.pem`, `*.key`, `id_rsa*` werden nie gelesen; Ausnahmen
+`.env.example`/`.sample`/`.template`/`.dist`. Platzhalter-Werte (`${…}`, `your-…`,
+`changeme`) loesen den generischen Regex nicht aus.
 Treffer → Datei im Baum mit `⚠ skipped (possible secret)`, Meldung auf stderr.
 Kein Entropie-Check in v1 (False Positives bei Hashes/Base64).
 
