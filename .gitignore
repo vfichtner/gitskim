@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+/SKIM.md
+.DS_Store
