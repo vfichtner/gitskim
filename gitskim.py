@@ -381,32 +381,61 @@ def skim_python(text: str) -> str:
     return "\n".join(out).rstrip("\n")
 
 
-# Lines that start a declaration in C-like / Go / Rust / Java / C# / TS code.
-_MODIFIERS = r"(?:export\s+|default\s+|pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|async\s+|abstract\s+|final\s+|override\s+|readonly\s+|unsafe\s+|extern\s+|declare\s+)*"
-_KEYWORDS = r"(?:import|from|package|using|namespace|module|function|class|interface|type|enum|struct|union|impl|trait|fn|func|def|const|let|var|record|use|mod|extends|implements)\b"
+# Lines that start a declaration in C-like / Go / Rust / Java / C# / Kotlin / Swift / TS code.
+_MODIFIERS = (r"(?:export\s+|default\s+|pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|"
+              r"static\s+|async\s+|abstract\s+|final\s+|override\s+|readonly\s+|unsafe\s+|extern\s+|declare\s+|"
+              r"data\s+|sealed\s+|open\s+|suspend\s+|inline\s+|operator\s+)*")
+_KEYWORDS = (r"(?:import|from|package|using|namespace|module|function|class|interface|enum|struct|union|impl|"
+             r"trait|fn|func|def|record|extends|implements|fun|object|protocol|extension|companion)\b")
+# Declarations that are only interesting at column 0; indented they are locals.
+_TOP_ONLY = r"(?:const|let|var|val|use|mod|type)\b"
 SIG_RE = re.compile(r"^\s{0,4}" + _MODIFIERS + _KEYWORDS)
+TOP_RE = re.compile(r"^" + _MODIFIERS + _TOP_ONLY)
 ANNOTATION_RE = re.compile(r"^\s*@\w+")
-CONTROL_RE = re.compile(r"^\s*(?:if|else|for|while|do|switch|case|try|catch|finally|return|with|match|loop|defer|go)\b")
+PREPROC_RE = re.compile(r"^\s{0,4}#(?:\[|\s*(?:include|define|pragma|if|ifdef|ifndef|endif|region))")
+CONTROL_RE = re.compile(r"^\s*(?:if|else|for|while|do|switch|case|try|catch|finally|return|with|match|loop|"
+                        r"defer|go|select|guard|elif|elseif|when)\b")
 
 
 def skim_regex(text: str, max_lines: int = 200) -> str:
     """Heuristic skimmer for brace languages: declarations and annotations, no bodies.
 
-    Keeps lines matching SIG_RE, annotations, and any line at indent <= 4 that
-    opens a block ('{') and is not a control statement. A trailing '{' becomes '{ ... }'.
+    Keeps lines matching SIG_RE / TOP_RE, annotations, preprocessor and attribute
+    lines, and any line at indent <= 4 that opens a block ('{') and is not a
+    control statement. A trailing '{' becomes '{ ... }'. Lines starting with '}'
+    are never kept; a bare '{' (Allman style) attaches to the previous line.
     """
-    out = []
+    out: list = []
+    prev: Optional[str] = None        # previous significant source line
+    prev_kept = False
     for raw in text.splitlines():
         line = raw.rstrip()
         stripped = line.strip()
-        if not stripped or stripped.startswith(("//", "#", "*", "/*")):
+        if not stripped or stripped.startswith(("//", "*", "/*")):
             continue
-        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("#") and not PREPROC_RE.match(line):
+            continue
+        if stripped.startswith("}"):          # closing braces, "} else {", "} catch (e) {"
+            prev, prev_kept = None, False
+            continue
+        expanded = raw.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip())
+        if stripped == "{":                   # Allman: the opener is the previous line
+            if prev is not None and indent <= 4 and not CONTROL_RE.match(prev):
+                if not prev_kept:
+                    out.append(prev + " { ... }")
+                elif not out[-1].endswith("{ ... }"):
+                    out[-1] += " { ... }"
+            prev, prev_kept = None, False
+            continue
         opens_block = stripped.endswith("{") and indent <= 4 and not CONTROL_RE.match(line)
-        if SIG_RE.match(line) or ANNOTATION_RE.match(line) or opens_block:
+        keep = bool(TOP_RE.match(line) or SIG_RE.match(line) or ANNOTATION_RE.match(line)
+                    or PREPROC_RE.match(line) or opens_block)
+        if keep:
             if stripped.endswith("{"):
                 line = line[: line.rfind("{")].rstrip() + " { ... }"
             out.append(line)
+        prev, prev_kept = line, keep
     if len(out) > max_lines:
         rest = len(out) - max_lines
         out = out[:max_lines] + [f"… ({rest} more signature lines)"]
@@ -464,7 +493,7 @@ def _tag(el) -> str:
 
 
 def _xml_col(col) -> str:
-    s = f"{col.get('name')} {col.get('type', '')}".strip()
+    s = f"{col.get('name', '?')} {col.get('type', '')}".strip()
     for c in col:
         if _tag(c) == "constraints":
             if c.get("primaryKey") == "true":
@@ -505,6 +534,10 @@ def _xml_op(ch) -> Optional[str]:
         return f"createIndex {g('indexName')} on {g('tableName')}({cols})"
     if t == "dropTable":
         return f"dropTable {g('tableName')}"
+    tbl = g("tableName") or g("baseTableName") or g("oldTableName") or ""
+    col = g("columnName") or g("columnNames") or ""
+    if tbl:
+        return f"{t} {tbl}{'.' + col if col else ''}"
     return f"other: {t}"
 
 
@@ -515,10 +548,12 @@ def skim_liquibase_xml(text: str) -> list:
         return []
     out = []
     for cs in root.iter():
-        if _tag(cs) != "changeSet":
-            continue
-        ops = [op for op in (_xml_op(ch) for ch in cs) if op]
-        out.append(f"- {cs.get('id', '?')}/{cs.get('author', '?')}: " + "; ".join(ops))
+        t = _tag(cs)
+        if t in ("include", "includeAll"):      # master changelog
+            out.append(f"- include {cs.get('file') or cs.get('path') or '?'}")
+        elif t == "changeSet":
+            ops = [op for op in (_xml_op(ch) for ch in cs) if op]
+            out.append(f"- {cs.get('id', '?')}/{cs.get('author', '?')}: " + "; ".join(ops))
     return out
 
 
@@ -533,7 +568,15 @@ def skim_liquibase_sql(text: str, max_len: int = 200) -> list:
     ops: list = []
     buf: list = []
 
+    def flush_stmt():                 # also called without a trailing ';' (boundary / EOF)
+        nonlocal buf
+        stmt = re.sub(r"\s+", " ", " ".join(buf)).strip().rstrip(";").strip()
+        buf = []
+        if stmt and SQL_DDL_RE.match(stmt):
+            ops.append(stmt[:max_len] + ("…" if len(stmt) > max_len else ""))
+
     def flush_changeset():
+        flush_stmt()
         if ops:
             out.append(f"- {current}: " + "; ".join(ops))
 
@@ -541,21 +584,19 @@ def skim_liquibase_sql(text: str, max_len: int = 200) -> list:
         m = SQL_CHANGESET_RE.match(line)
         if m:
             flush_changeset()
-            current, ops, buf = m.group(1), [], []
+            current, ops = m.group(1), []
             continue
         if line.strip().startswith("--"):
             continue
         buf.append(line)
         if ";" in line:
-            stmt = re.sub(r"\s+", " ", " ".join(buf)).strip().rstrip(";").strip()
-            buf = []
-            if SQL_DDL_RE.match(stmt):
-                ops.append(stmt[:max_len] + ("…" if len(stmt) > max_len else ""))
+            flush_stmt()
     flush_changeset()
     return out
 
 
 _YAML_OPS = ("createTable", "addColumn", "dropColumn", "renameColumn", "addForeignKeyConstraint", "createIndex", "dropTable")
+_YAML_STRUCTURAL = {"changes", "columns", "column", "constraints", "preConditions", "rollback", "validCheckSum"}
 
 
 def skim_liquibase_yaml(text: str) -> list:
@@ -568,7 +609,8 @@ def skim_liquibase_yaml(text: str) -> list:
             ops = []
             for op in cs["ops"]:
                 cols = ", ".join(c.strip() for c in op["cols"])
-                ops.append(f"{op['name']} {op.get('table', '?')}({cols})" if op["cols"] else f"{op['name']} {op.get('table', '?')}")
+                head = f"{op['name']} {op['table']}" if op.get("table") else op["name"]
+                ops.append(f"{head}({cols})" if op["cols"] else head)
             out.append(f"- {cs.get('id', '?')}/{cs.get('author', '?')}: " + "; ".join(ops))
 
     for raw in text.splitlines():
@@ -587,6 +629,8 @@ def skim_liquibase_yaml(text: str) -> list:
             cs["author"] = val
         elif key in _YAML_OPS:
             cs["ops"].append({"name": key, "cols": []})
+        elif not val and key[:1].islower() and key.isidentifier() and key not in _YAML_STRUCTURAL:
+            cs["ops"].append({"name": f"other: {key}", "cols": []})    # unknown change type
         elif key == "tableName" and cs["ops"]:
             cs["ops"][-1]["table"] = val
         elif key == "name" and cs["ops"]:

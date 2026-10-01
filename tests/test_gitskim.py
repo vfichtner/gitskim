@@ -436,7 +436,83 @@ public class OrderService {
 """
 
 
+GO_SAMPLE = """package server
+
+import (
+\t"fmt"
+\t"net/http"
+)
+
+type Server struct {
+\taddr string
+}
+
+func (s *Server) Start() error {
+\tif err := http.ListenAndServe(s.addr, nil); err != nil {
+\t\treturn fmt.Errorf("listen: %w", err)
+\t}
+\treturn nil
+}
+"""
+
+RUST_SAMPLE = """use std::collections::HashMap;
+
+#[derive(Debug)]
+pub struct Cache<T> {
+    map: HashMap<String, T>,
+}
+
+impl<T> Default for Cache<T> {
+    pub fn new() -> Self {
+        let map = HashMap::new();
+        Self { map }
+    }
+}
+"""
+
+
 class TestSkimRegex(unittest.TestCase):
+    def test_let_const_var_only_at_top_level(self):
+        out = gitskim.skim_regex("fn main() {\n    let m = HashMap::new();\n}\n")
+        self.assertEqual(out, "fn main() { ... }")
+        self.assertIn("const MAX: u32 = 3;", gitskim.skim_regex("const MAX: u32 = 3;\n"))
+
+    def test_closing_brace_lines_skipped_and_allman_attached(self):
+        self.assertEqual(gitskim.skim_regex("func f() {\n\tif x {\n\t} else {\n\t}\n}\n"), "func f() { ... }")
+        self.assertEqual(gitskim.skim_regex("public void Run()\n{\n}\n"), "public void Run() { ... }")
+        # Allman after a kept declaration line: no double brace, nothing attached to unrelated lines
+        self.assertEqual(gitskim.skim_regex("import foo;\npublic class A\n{\n}\n"), "import foo;\npublic class A { ... }")
+        self.assertEqual(gitskim.skim_regex("import foo;\nif (x)\n{\n}\n"), "import foo;")
+
+    def test_preprocessor_and_attributes_kept_comments_dropped(self):
+        out = gitskim.skim_regex("#include <stdio.h>\n#define MAX 3\nint main() {\n  return 0;\n}\n")
+        self.assertIn("#include <stdio.h>", out)
+        self.assertIn("#define MAX 3", out)
+        self.assertIn("int main() { ... }", out)
+        self.assertIn("#[derive(Debug)]", gitskim.skim_regex("#[derive(Debug)]\npub struct A;\n"))
+        self.assertNotIn("comment", gitskim.skim_regex("# a comment\nfunction f() {}\n"))
+
+    def test_kotlin_declarations_and_go_select(self):
+        out = gitskim.skim_regex("data class User(val id: Int)\nfun helper(x: Int) = x * 2\nobject Err : Base()\n")
+        for sig in ["data class User(val id: Int)", "fun helper(x: Int) = x * 2", "object Err : Base()"]:
+            self.assertIn(sig, out)
+        self.assertNotIn("select", gitskim.skim_regex("func f() {\n\tselect {\n\tcase <-c:\n\t}\n}\n"))
+
+    def test_go_fixture(self):
+        out = gitskim.skim_regex(GO_SAMPLE)
+        for sig in ["package server", "type Server struct { ... }", "func (s *Server) Start() error { ... }"]:
+            self.assertIn(sig, out)
+        for body in ["if err", "return", "addr string"]:
+            self.assertNotIn(body, out)
+
+    def test_rust_fixture(self):
+        out = gitskim.skim_regex(RUST_SAMPLE)
+        for sig in ["use std::collections::HashMap;", "#[derive(Debug)]", "pub struct Cache<T> { ... }",
+                    "impl<T> Default for Cache<T> { ... }", "    pub fn new() -> Self { ... }"]:
+            self.assertIn(sig, out)
+        for body in ["let map", "Self { map }", "map: HashMap"]:
+            self.assertNotIn(body, out)
+
     def test_typescript_keeps_declarations_drops_bodies(self):
         out = gitskim.skim_regex(TS_SAMPLE)
         self.assertIn("import { Foo } from './foo';", out)
@@ -578,6 +654,33 @@ class TestLiquibase(unittest.TestCase):
             "- vf:1: CREATE TABLE users ( id uuid PRIMARY KEY, email varchar(255) NOT NULL )",
             "- vf:2: ALTER TABLE users ADD COLUMN age int; CREATE UNIQUE INDEX ix_users_email ON users(email)",
         ])
+
+    def test_sql_statement_without_semicolon(self):
+        text = "--changeset vf:1\nCREATE TABLE t (id int)\n--changeset vf:2\nCREATE TABLE u (id int)\n"
+        self.assertEqual(gitskim.skim_db_changelog("db/changelog/a.sql", text),
+                         ["- vf:1: CREATE TABLE t (id int)", "- vf:2: CREATE TABLE u (id int)"])
+
+    def test_xml_master_includes(self):
+        master = ('<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">\n'
+                  '  <include file="db/changelog/001.xml"/>\n'
+                  '  <includeAll path="db/changelog/releases/"/>\n'
+                  '</databaseChangeLog>\n')
+        self.assertEqual(gitskim.skim_db_changelog("db/changelog/master.xml", master),
+                         ["- include db/changelog/001.xml", "- include db/changelog/releases/"])
+
+    def test_xml_generic_op_with_table_attrs(self):
+        xml = ('<databaseChangeLog><changeSet id="3" author="vf">'
+               '<addNotNullConstraint tableName="users" columnName="email"/>'
+               '<sql>UPDATE users SET x = 1</sql>'
+               '<addUniqueConstraint tableName="users" columnNames="a, b"/>'
+               '</changeSet></databaseChangeLog>')
+        self.assertEqual(gitskim.skim_db_changelog("db/changelog/a.xml", xml),
+                         ["- 3/vf: addNotNullConstraint users.email; other: sql; addUniqueConstraint users.a, b"])
+
+    def test_yaml_unknown_op(self):
+        text = ("databaseChangeLog:\n  - changeSet:\n      id: 9\n      author: vf\n      changes:\n"
+                "        - addNotNullConstraint:\n            tableName: users\n            columnName: email\n")
+        self.assertEqual(gitskim.skim_db_changelog("db/changelog/a.yaml", text), ["- 9/vf: other: addNotNullConstraint users"])
 
     def test_yaml(self):
         lines = gitskim.skim_db_changelog("db/changelog/a.yaml", LB_YAML)
