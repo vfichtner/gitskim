@@ -333,5 +333,101 @@ class TestSkimPython(unittest.TestCase):
         self.assertIn("more lines", out)
 
 
+TS_SAMPLE = """import { Foo } from './foo';
+export const VERSION = '1.0';
+
+export interface User {
+  id: number;
+  name: string;
+}
+
+export class UserService extends Base {
+  private cache = new Map();
+
+  constructor(private http: HttpClient) {}
+
+  async getUser(id: number): Promise<User> {
+    if (this.cache.has(id)) {
+      return this.cache.get(id);
+    }
+    return this.http.get(`/users/${id}`);
+  }
+}
+
+export function helper(x: number) {
+  return x * 2;
+}
+"""
+
+JAVA_SAMPLE = """package com.example;
+
+import java.util.List;
+
+@Service
+public class OrderService {
+    private final OrderRepo repo;
+
+    @Transactional
+    public Order create(OrderRequest req) {
+        if (req == null) {
+            throw new IllegalArgumentException();
+        }
+        return repo.save(new Order(req));
+    }
+}
+"""
+
+
+class TestSkimRegex(unittest.TestCase):
+    def test_typescript_keeps_declarations_drops_bodies(self):
+        out = gitskim.skim_regex(TS_SAMPLE)
+        self.assertIn("import { Foo } from './foo';", out)
+        self.assertIn("export const VERSION = '1.0';", out)
+        self.assertIn("export interface User { ... }", out)
+        self.assertIn("export class UserService extends Base { ... }", out)
+        self.assertIn("  async getUser(id: number): Promise<User> { ... }", out)
+        self.assertIn("export function helper(x: number) { ... }", out)
+        self.assertNotIn("this.cache.get", out)
+        self.assertNotIn("if (this.cache", out)
+
+    def test_java_keeps_annotations_and_methods(self):
+        out = gitskim.skim_regex(JAVA_SAMPLE)
+        self.assertIn("package com.example;", out)
+        self.assertIn("@Service", out)
+        self.assertIn("public class OrderService { ... }", out)
+        self.assertIn("    @Transactional", out)
+        self.assertIn("    public Order create(OrderRequest req) { ... }", out)
+        self.assertNotIn("throw new", out)
+
+    def test_caps_output(self):
+        many = "\n".join(f"export const C{i} = {i};" for i in range(500))
+        out = gitskim.skim_regex(many, max_lines=50)
+        self.assertEqual(out.count("export const"), 50)
+        self.assertIn("more signature lines", out)
+
+
+class TestSkimMarkdown(unittest.TestCase):
+    def test_headings_only(self):
+        out = gitskim.skim_markdown("# Title\n\ntext\n\n## Sub\nmore\n### Deep\n")
+        self.assertEqual(out, "# Title\n## Sub\n### Deep")
+
+    def test_no_headings_falls_back(self):
+        out = gitskim.skim_markdown("just text\n")
+        self.assertEqual(out, "just text")
+
+
+class TestRegistry(unittest.TestCase):
+    def test_skimmer_for_ext(self):
+        self.assertIs(gitskim.skimmer_for("a/b.py"), gitskim.skim_python)
+        self.assertIs(gitskim.skimmer_for("x.ts"), gitskim.skim_regex)
+        self.assertIs(gitskim.skimmer_for("x.md"), gitskim.skim_markdown)
+        self.assertIs(gitskim.skimmer_for("x.unknownext"), gitskim.skim_fallback)
+
+    def test_lang_for(self):
+        self.assertEqual(gitskim.lang_for("a.py"), "python")
+        self.assertEqual(gitskim.lang_for("Dockerfile"), "dockerfile")
+        self.assertEqual(gitskim.lang_for("x.weird"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

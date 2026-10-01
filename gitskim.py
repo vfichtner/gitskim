@@ -348,7 +348,72 @@ def skim_python(text: str) -> str:
     return "\n".join(out).rstrip("\n")
 
 
-# (Task 7)
+# Lines that start a declaration in C-like / Go / Rust / Java / C# / TS code.
+_MODIFIERS = r"(?:export\s+|default\s+|pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|async\s+|abstract\s+|final\s+|override\s+|readonly\s+|unsafe\s+|extern\s+|declare\s+)*"
+_KEYWORDS = r"(?:import|from|package|using|namespace|module|function|class|interface|type|enum|struct|union|impl|trait|fn|func|def|const|let|var|record|use|mod|extends|implements)\b"
+SIG_RE = re.compile(r"^\s{0,4}" + _MODIFIERS + _KEYWORDS)
+ANNOTATION_RE = re.compile(r"^\s*@\w+")
+CONTROL_RE = re.compile(r"^\s*(?:if|else|for|while|do|switch|case|try|catch|finally|return|with|match|loop|defer|go)\b")
+
+
+def skim_regex(text: str, max_lines: int = 200) -> str:
+    """Heuristic skimmer for brace languages: declarations and annotations, no bodies.
+
+    Keeps lines matching SIG_RE, annotations, and any line at indent <= 4 that
+    opens a block ('{') and is not a control statement. A trailing '{' becomes '{ ... }'.
+    """
+    out = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "#", "*", "/*")):
+            continue
+        indent = len(line) - len(line.lstrip())
+        opens_block = stripped.endswith("{") and indent <= 4 and not CONTROL_RE.match(line)
+        if SIG_RE.match(line) or ANNOTATION_RE.match(line) or opens_block:
+            if stripped.endswith("{"):
+                line = line[: line.rfind("{")].rstrip() + " { ... }"
+            out.append(line)
+    if len(out) > max_lines:
+        rest = len(out) - max_lines
+        out = out[:max_lines] + [f"… ({rest} more signature lines)"]
+    return "\n".join(out)
+
+
+HEADING_RE = re.compile(r"^#{1,6}\s")
+
+
+def skim_markdown(text: str) -> str:
+    heads = [l.rstrip() for l in text.splitlines() if HEADING_RE.match(l)]
+    return "\n".join(heads) if heads else skim_fallback(text)
+
+
+LANG_BY_EXT = {
+    ".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".jsx": "jsx", ".ts": "typescript", ".tsx": "tsx", ".go": "go", ".rs": "rust",
+    ".java": "java", ".kt": "kotlin", ".cs": "csharp", ".c": "c", ".h": "c",
+    ".cpp": "cpp", ".hpp": "cpp", ".rb": "ruby", ".php": "php", ".swift": "swift",
+    ".scala": "scala", ".sh": "bash", ".bash": "bash", ".zsh": "bash",
+    ".md": "markdown", ".yml": "yaml", ".yaml": "yaml", ".toml": "toml",
+    ".json": "json", ".xml": "xml", ".html": "html", ".css": "css", ".scss": "scss",
+    ".sql": "sql", ".tf": "hcl", ".ini": "ini", ".cfg": "ini", ".txt": "",
+}
+LANG_BY_NAME = {"dockerfile": "dockerfile", "makefile": "makefile", "jenkinsfile": "groovy"}
+
+REGEX_EXTS = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
+              ".kt", ".cs", ".c", ".h", ".cpp", ".hpp", ".swift", ".scala", ".php"}
+
+SKIMMERS: dict = {".py": skim_python, ".md": skim_markdown}
+SKIMMERS.update({ext: skim_regex for ext in REGEX_EXTS})
+
+
+def skimmer_for(rel: str) -> Callable[[str], str]:
+    return SKIMMERS.get(Path(rel).suffix.lower(), skim_fallback)
+
+
+def lang_for(rel: str) -> str:
+    p = Path(rel)
+    return LANG_BY_EXT.get(p.suffix.lower()) or LANG_BY_NAME.get(p.name.lower(), "")
 
 
 # ── Database changelogs ───────────────────────────────────────────────────────
