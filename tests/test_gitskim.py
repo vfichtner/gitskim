@@ -93,5 +93,62 @@ class TestRunGit(unittest.TestCase):
             gitskim.run_git(repo, "rev-parse", "--verify", "nope")
 
 
+class TestCollectFiles(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo({
+            "README.md": "# hi",
+            "src/app.py": "print(1)",
+            "package-lock.json": "{}",
+            "dist/bundle.js": "x",
+            "assets/logo.png": b"\x89PNG\x00\x00",
+            "data/blob.dat": b"\x00\x01\x02",
+            "big.txt": "x" * 2048,
+            "notes.txt": "n",
+        })
+
+    def paths(self, entries):
+        return [e.path for e in entries]
+
+    def test_default_ignore_drops_lockfiles_dist_and_images(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options())
+        p = self.paths(entries)
+        self.assertNotIn("package-lock.json", p)
+        self.assertNotIn("dist/bundle.js", p)
+        self.assertNotIn("assets/logo.png", p)
+        self.assertIn("src/app.py", p)
+        self.assertIn("README.md", p)
+
+    def test_no_default_ignore_keeps_them(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options(default_ignore=False))
+        self.assertIn("package-lock.json", self.paths(entries))
+
+    def test_include_and_exclude_globs(self):
+        inc = gitskim.collect_files(self.repo, gitskim.Options(include=["*.py"]))
+        self.assertEqual(self.paths(inc), ["src/app.py"])
+        exc = gitskim.collect_files(self.repo, gitskim.Options(exclude=["*.md", "src/*"]))
+        p = self.paths(exc)
+        self.assertNotIn("README.md", p)
+        self.assertNotIn("src/app.py", p)
+        self.assertIn("notes.txt", p)
+
+    def test_max_size_marks_too_large_but_keeps_in_tree(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options(max_size_kb=1))
+        big = next(e for e in entries if e.path == "big.txt")
+        self.assertEqual(big.status, "too_large")
+
+    def test_binary_sniff(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options())
+        blob = next(e for e in entries if e.path == "data/blob.dat")
+        self.assertEqual(blob.status, "binary")
+
+    def test_untracked_files_only_with_flag(self):
+        (self.repo / "new.txt").write_text("new")
+        default = gitskim.collect_files(self.repo, gitskim.Options())
+        self.assertNotIn("new.txt", self.paths(default))
+        with_flag = gitskim.collect_files(self.repo, gitskim.Options(untracked=True))
+        self.assertIn("new.txt", self.paths(with_flag))
+        self.assertIn("src/app.py", self.paths(with_flag))
+
+
 if __name__ == "__main__":
     unittest.main()

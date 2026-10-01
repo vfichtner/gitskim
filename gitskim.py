@@ -117,7 +117,71 @@ def cleanup(tmp: Optional[Path]) -> None:
 
 # ── File collection ───────────────────────────────────────────────────────────
 
-# (Task 3)
+IGNORE_DIRS = {
+    "node_modules", "dist", "build", "vendor", "__pycache__", ".git",
+    ".idea", ".vscode", "target", ".next", ".venv", "venv", "coverage",
+}
+
+DEFAULT_IGNORE = [
+    # lockfiles
+    "*.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
+    "Cargo.lock", "Pipfile.lock", "composer.lock", "Gemfile.lock", "go.sum",
+    # generated / minified
+    "*.min.js", "*.min.css", "*.map", "*.bundle.js",
+    # binaries & media
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico", "*.svg", "*.webp", "*.pdf",
+    "*.woff", "*.woff2", "*.ttf", "*.eot", "*.otf",
+    "*.zip", "*.gz", "*.tar", "*.tgz", "*.7z", "*.jar", "*.war",
+    "*.pyc", "*.pyo", "*.so", "*.dylib", "*.dll", "*.exe", "*.bin", "*.class", "*.o",
+    "*.mp3", "*.mp4", "*.mov", "*.wav",
+    ".DS_Store", "Thumbs.db",
+]
+
+
+def matches_any(rel: str, patterns: list) -> bool:
+    """fnmatch against the full relative path and the basename."""
+    name = rel.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(name, p) for p in patterns)
+
+
+def in_ignored_dir(rel: str) -> bool:
+    return bool(set(rel.split("/")[:-1]) & IGNORE_DIRS)
+
+
+def is_binary(path: Path) -> bool:
+    with open(path, "rb") as f:
+        return b"\0" in f.read(8192)
+
+
+def collect_files(repo: Path, opts: Options) -> list:
+    """List candidate files via git ls-files and apply the filter chain.
+
+    Filtered-out files are dropped. Too-large and binary files are kept with a
+    status so they still appear in the tree.
+    """
+    args = ["ls-files", "-z"]
+    if opts.untracked:
+        args += ["--cached", "--others", "--exclude-standard"]
+    out = run_git(repo, *args)
+    entries = []
+    for rel in sorted(filter(None, out.split("\0"))):
+        if opts.default_ignore and (in_ignored_dir(rel) or matches_any(rel, DEFAULT_IGNORE)):
+            continue
+        if opts.exclude and matches_any(rel, opts.exclude):
+            continue
+        if opts.include and not matches_any(rel, opts.include):
+            continue
+        p = repo / rel
+        if not p.is_file():          # submodule dirs, deleted-but-indexed files
+            continue
+        size = p.stat().st_size
+        entry = FileEntry(path=rel, size=size)
+        if size > opts.max_size_kb * 1024:
+            entry.status = "too_large"
+        elif is_binary(p):
+            entry.status = "binary"
+        entries.append(entry)
+    return entries
 
 
 # ── Ranking ───────────────────────────────────────────────────────────────────
