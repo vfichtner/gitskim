@@ -429,5 +429,105 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(gitskim.lang_for("x.weird"), "")
 
 
+LB_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+  <changeSet id="1" author="vf">
+    <comment>users</comment>
+    <createTable tableName="users">
+      <column name="id" type="uuid"><constraints primaryKey="true" nullable="false"/></column>
+      <column name="email" type="varchar(255)"><constraints nullable="false" unique="true"/></column>
+    </createTable>
+    <createIndex indexName="ix_users_email" tableName="users">
+      <column name="email"/>
+    </createIndex>
+  </changeSet>
+  <changeSet id="2" author="vf">
+    <addColumn tableName="users"><column name="age" type="int"/></addColumn>
+    <addForeignKeyConstraint baseTableName="orders" baseColumnNames="user_id"
+        referencedTableName="users" referencedColumnNames="id" constraintName="fk_o_u"/>
+    <renameColumn tableName="users" oldColumnName="age" newColumnName="years"/>
+    <dropColumn tableName="users" columnName="years"/>
+    <sql>UPDATE users SET x = 1</sql>
+    <dropTable tableName="legacy"/>
+  </changeSet>
+</databaseChangeLog>
+"""
+
+LB_SQL = """--liquibase formatted sql
+
+--changeset vf:1
+CREATE TABLE users (
+    id uuid PRIMARY KEY,
+    email varchar(255) NOT NULL
+);
+INSERT INTO users VALUES ('x');
+
+--changeset vf:2
+ALTER TABLE users ADD COLUMN age int;
+CREATE UNIQUE INDEX ix_users_email ON users(email);
+"""
+
+LB_YAML = """databaseChangeLog:
+  - changeSet:
+      id: 1
+      author: vf
+      changes:
+        - createTable:
+            tableName: users
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+              - column:
+                  name: email
+                  type: varchar(255)
+  - changeSet:
+      id: 2
+      author: vf
+      changes:
+        - addColumn:
+            tableName: users
+            columns:
+              - column:
+                  name: age
+                  type: int
+"""
+
+
+class TestLiquibase(unittest.TestCase):
+    def test_is_db_changelog(self):
+        self.assertTrue(gitskim.is_db_changelog("src/main/resources/db/changelog/001.xml"))
+        self.assertTrue(gitskim.is_db_changelog("db/migration/V1__init.sql"))
+        self.assertTrue(gitskim.is_db_changelog("liquibase/master.yaml"))
+        self.assertFalse(gitskim.is_db_changelog("src/app.py"))
+        self.assertFalse(gitskim.is_db_changelog("docs/changelog.md"))
+
+    def test_xml(self):
+        lines = gitskim.skim_db_changelog("db/changelog/a.xml", LB_XML)
+        self.assertEqual(lines[0],
+            "- 1/vf: createTable users(id uuid PK NOT NULL, email varchar(255) NOT NULL UNIQUE); "
+            "createIndex ix_users_email on users(email)")
+        self.assertEqual(lines[1],
+            "- 2/vf: addColumn users(age int); FK orders.user_id -> users.id; "
+            "renameColumn users.age -> years; dropColumn users.years; other: sql; dropTable legacy")
+
+    def test_xml_parse_error_returns_empty(self):
+        self.assertEqual(gitskim.skim_db_changelog("db/changelog/a.xml", "<broken"), [])
+
+    def test_sql(self):
+        lines = gitskim.skim_db_changelog("db/changelog/a.sql", LB_SQL)
+        self.assertEqual(lines, [
+            "- vf:1: CREATE TABLE users ( id uuid PRIMARY KEY, email varchar(255) NOT NULL )",
+            "- vf:2: ALTER TABLE users ADD COLUMN age int; CREATE UNIQUE INDEX ix_users_email ON users(email)",
+        ])
+
+    def test_yaml(self):
+        lines = gitskim.skim_db_changelog("db/changelog/a.yaml", LB_YAML)
+        self.assertEqual(lines, [
+            "- 1/vf: createTable users(id uuid, email varchar(255))",
+            "- 2/vf: addColumn users(age int)",
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

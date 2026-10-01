@@ -418,7 +418,159 @@ def lang_for(rel: str) -> str:
 
 # ── Database changelogs ───────────────────────────────────────────────────────
 
-# (Task 8)
+DB_PATH_RE = re.compile(r"(changelog|liquibase|migration|flyway)", re.I)
+DB_EXTS = (".xml", ".yaml", ".yml", ".sql")
+
+
+def is_db_changelog(rel: str) -> bool:
+    return rel.lower().endswith(DB_EXTS) and bool(DB_PATH_RE.search(rel))
+
+
+def _tag(el) -> str:
+    return el.tag.split("}", 1)[-1]
+
+
+def _xml_col(col) -> str:
+    s = f"{col.get('name')} {col.get('type', '')}".strip()
+    for c in col:
+        if _tag(c) == "constraints":
+            if c.get("primaryKey") == "true":
+                s += " PK"
+            if c.get("nullable") == "false":
+                s += " NOT NULL"
+            if c.get("unique") == "true":
+                s += " UNIQUE"
+            if c.get("referencedTableName"):
+                s += f" FK->{c.get('referencedTableName')}"
+    return s
+
+
+def _xml_cols(el) -> str:
+    return ", ".join(_xml_col(c) for c in el if _tag(c) == "column")
+
+
+_XML_SKIP = {"comment", "preConditions", "rollback", "validCheckSum"}
+
+
+def _xml_op(ch) -> Optional[str]:
+    t = _tag(ch)
+    g = ch.get
+    if t in _XML_SKIP:
+        return None
+    if t == "createTable":
+        return f"createTable {g('tableName')}({_xml_cols(ch)})"
+    if t == "addColumn":
+        return f"addColumn {g('tableName')}({_xml_cols(ch)})"
+    if t == "dropColumn":
+        return f"dropColumn {g('tableName')}.{g('columnName')}"
+    if t == "renameColumn":
+        return f"renameColumn {g('tableName')}.{g('oldColumnName')} -> {g('newColumnName')}"
+    if t == "addForeignKeyConstraint":
+        return f"FK {g('baseTableName')}.{g('baseColumnNames')} -> {g('referencedTableName')}.{g('referencedColumnNames')}"
+    if t == "createIndex":
+        cols = ", ".join(c.get("name", "") for c in ch if _tag(c) == "column")
+        return f"createIndex {g('indexName')} on {g('tableName')}({cols})"
+    if t == "dropTable":
+        return f"dropTable {g('tableName')}"
+    return f"other: {t}"
+
+
+def skim_liquibase_xml(text: str) -> list:
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return []
+    out = []
+    for cs in root.iter():
+        if _tag(cs) != "changeSet":
+            continue
+        ops = [op for op in (_xml_op(ch) for ch in cs) if op]
+        out.append(f"- {cs.get('id', '?')}/{cs.get('author', '?')}: " + "; ".join(ops))
+    return out
+
+
+SQL_CHANGESET_RE = re.compile(r"^\s*--\s*changeset\s+(\S+)", re.I)
+SQL_DDL_RE = re.compile(r"^(CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX|VIEW)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX))\b", re.I)
+
+
+def skim_liquibase_sql(text: str, max_len: int = 200) -> list:
+    """One line per --changeset with its DDL statements, whitespace squashed."""
+    out = []
+    current = "?"
+    ops: list = []
+    buf: list = []
+
+    def flush_changeset():
+        if ops:
+            out.append(f"- {current}: " + "; ".join(ops))
+
+    for line in text.splitlines():
+        m = SQL_CHANGESET_RE.match(line)
+        if m:
+            flush_changeset()
+            current, ops, buf = m.group(1), [], []
+            continue
+        if line.strip().startswith("--"):
+            continue
+        buf.append(line)
+        if ";" in line:
+            stmt = re.sub(r"\s+", " ", " ".join(buf)).strip().rstrip(";").strip()
+            buf = []
+            if SQL_DDL_RE.match(stmt):
+                ops.append(stmt[:max_len] + ("…" if len(stmt) > max_len else ""))
+    flush_changeset()
+    return out
+
+
+_YAML_OPS = ("createTable", "addColumn", "dropColumn", "renameColumn", "addForeignKeyConstraint", "createIndex", "dropTable")
+
+
+def skim_liquibase_yaml(text: str) -> list:
+    """Very rough YAML changelog reader: changeSet id/author, op, tableName, columns."""
+    out = []
+    cs: Optional[dict] = None
+
+    def flush():
+        if cs:
+            ops = []
+            for op in cs["ops"]:
+                cols = ", ".join(c.strip() for c in op["cols"])
+                ops.append(f"{op['name']} {op.get('table', '?')}({cols})" if op["cols"] else f"{op['name']} {op.get('table', '?')}")
+            out.append(f"- {cs.get('id', '?')}/{cs.get('author', '?')}: " + "; ".join(ops))
+
+    for raw in text.splitlines():
+        s = raw.strip().lstrip("- ").strip()
+        if s.startswith("changeSet:"):
+            flush()
+            cs = {"ops": []}
+            continue
+        if cs is None:
+            continue
+        key, _, val = s.partition(":")
+        val = val.strip()
+        if key == "id":
+            cs["id"] = val
+        elif key == "author":
+            cs["author"] = val
+        elif key in _YAML_OPS:
+            cs["ops"].append({"name": key, "cols": []})
+        elif key == "tableName" and cs["ops"]:
+            cs["ops"][-1]["table"] = val
+        elif key == "name" and cs["ops"]:
+            cs["ops"][-1]["cols"].append(val)
+        elif key == "type" and cs["ops"] and cs["ops"][-1]["cols"]:
+            cs["ops"][-1]["cols"][-1] += f" {val}"
+    flush()
+    return out
+
+
+def skim_db_changelog(rel: str, text: str) -> list:
+    ext = Path(rel).suffix.lower()
+    if ext == ".xml":
+        return skim_liquibase_xml(text)
+    if ext == ".sql":
+        return skim_liquibase_sql(text)
+    return skim_liquibase_yaml(text)
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
