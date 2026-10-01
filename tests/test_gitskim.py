@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,9 +17,14 @@ def git(repo: Path, *args: str) -> str:
     ).stdout
 
 
-def make_repo(files: dict, extra_commits: dict | None = None) -> Path:
-    """Create a temp git repo. files: {relpath: str|bytes}. extra_commits: {relpath: new_content} committed one by one."""
+def make_repo(files: dict, extra_commits: dict | None = None, case: unittest.TestCase | None = None) -> Path:
+    """Create a temp git repo. files: {relpath: str|bytes}. extra_commits: {relpath: new_content} committed one by one.
+
+    When case is given, the tempdir is removed via case.addCleanup.
+    """
     tmp = Path(tempfile.mkdtemp(prefix="gitskim-test-"))
+    if case is not None:
+        case.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
     subprocess.run(["git", "init", "-q", "-b", "main", str(tmp)], check=True)
     git(tmp, "config", "user.email", "test@example.com")
     git(tmp, "config", "user.name", "Test")
@@ -51,7 +57,7 @@ class TestCli(unittest.TestCase):
 
 class TestResolveSource(unittest.TestCase):
     def test_local_repo_resolves_to_toplevel(self):
-        repo = make_repo({"a.txt": "a", "sub/b.txt": "b"})
+        repo = make_repo({"a.txt": "a", "sub/b.txt": "b"}, case=self)
         path, tmp, name = gitskim.resolve_source(str(repo / "sub"))
         self.assertEqual(path, repo.resolve())
         self.assertIsNone(tmp)
@@ -59,6 +65,7 @@ class TestResolveSource(unittest.TestCase):
 
     def test_non_repo_raises(self):
         plain = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
         with self.assertRaises(gitskim.GitskimError):
             gitskim.resolve_source(str(plain))
 
@@ -67,7 +74,7 @@ class TestResolveSource(unittest.TestCase):
             gitskim.resolve_source("/definitely/not/here")
 
     def test_local_url_clone(self):
-        repo = make_repo({"a.txt": "a"})
+        repo = make_repo({"a.txt": "a"}, case=self)
         path, tmp, name = gitskim.resolve_source(f"file://{repo}")
         try:
             self.assertTrue((path / "a.txt").exists())
@@ -82,13 +89,24 @@ class TestResolveSource(unittest.TestCase):
             gitskim.resolve_source("file:///nonexistent/repo.git")
 
 
+class TestRepoName(unittest.TestCase):
+    def test_ssh_scp_style(self):
+        self.assertEqual(gitskim.repo_name_from_url("git@github.com:user/repo.git"), "repo")
+
+    def test_https_with_suffix(self):
+        self.assertEqual(gitskim.repo_name_from_url("https://x/y/repo.git"), "repo")
+
+    def test_trailing_slash_no_suffix(self):
+        self.assertEqual(gitskim.repo_name_from_url("https://x/y/repo/"), "repo")
+
+
 class TestRunGit(unittest.TestCase):
     def test_run_git_returns_stdout(self):
-        repo = make_repo({"a.txt": "a"})
+        repo = make_repo({"a.txt": "a"}, case=self)
         self.assertEqual(gitskim.run_git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
 
     def test_run_git_failure_raises(self):
-        repo = make_repo({"a.txt": "a"})
+        repo = make_repo({"a.txt": "a"}, case=self)
         with self.assertRaises(gitskim.GitskimError):
             gitskim.run_git(repo, "rev-parse", "--verify", "nope")
 
@@ -104,7 +122,9 @@ class TestCollectFiles(unittest.TestCase):
             "data/blob.dat": b"\x00\x01\x02",
             "big.txt": "x" * 2048,
             "notes.txt": "n",
-        })
+            "LOGO.PNG": b"\x89PNG",
+            "pkg/node_modules/x.js": "x",
+        }, case=self)
 
     def paths(self, entries):
         return [e.path for e in entries]
@@ -140,6 +160,24 @@ class TestCollectFiles(unittest.TestCase):
         entries = gitskim.collect_files(self.repo, gitskim.Options())
         blob = next(e for e in entries if e.path == "data/blob.dat")
         self.assertEqual(blob.status, "binary")
+
+    def test_include_bypasses_default_ignore(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options(include=["*.png"]))
+        self.assertEqual(self.paths(entries), ["assets/logo.png"])
+
+    def test_exclude_beats_include(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options(include=["*.txt"], exclude=["big.txt"]))
+        self.assertEqual(self.paths(entries), ["notes.txt"])
+
+    def test_default_ignore_is_case_insensitive(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options())
+        self.assertNotIn("LOGO.PNG", self.paths(entries))
+
+    def test_nested_ignored_dir(self):
+        entries = gitskim.collect_files(self.repo, gitskim.Options())
+        self.assertNotIn("pkg/node_modules/x.js", self.paths(entries))
+        kept = gitskim.collect_files(self.repo, gitskim.Options(default_ignore=False))
+        self.assertIn("pkg/node_modules/x.js", self.paths(kept))
 
     def test_untracked_files_only_with_flag(self):
         (self.repo / "new.txt").write_text("new")

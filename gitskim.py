@@ -67,14 +67,19 @@ URL_RE = re.compile(r"^(https?://|git@|ssh://|git://|file://)")
 def run_git(repo: Path, *args: str) -> str:
     """Run a git command in repo and return stdout. Raises GitskimError on failure."""
     try:
-        res = subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
-        )
+        res = subprocess.run(["git", *args], cwd=repo, capture_output=True, check=True)
     except FileNotFoundError:
         raise GitskimError("git not found on PATH") from None
     except subprocess.CalledProcessError as e:
-        raise GitskimError(f"git {' '.join(args)} failed: {e.stderr.strip()}") from None
-    return res.stdout
+        err = e.stderr.decode("utf-8", "replace").strip()
+        raise GitskimError(f"git {' '.join(args)} failed: {err}") from None
+    # surrogateescape: never raise on odd bytes in paths; keeps \r etc. intact.
+    return res.stdout.decode("utf-8", "surrogateescape")
+
+
+def repo_name_from_url(url: str) -> str:
+    """Last path segment of a git URL without .git, e.g. git@host:user/repo.git -> repo."""
+    return re.split(r"[/:]", url.rstrip("/"))[-1].removesuffix(".git")
 
 
 def resolve_source(arg: str) -> tuple:
@@ -82,6 +87,9 @@ def resolve_source(arg: str) -> tuple:
 
     URLs are shallow-cloned into a tempdir the caller must remove via cleanup().
     """
+    if shutil.which("git") is None:
+        raise GitskimError("git not found on PATH")
+
     if URL_RE.match(arg) or arg.endswith(".git"):
         tmp = Path(tempfile.mkdtemp(prefix="gitskim-"))
         dest = tmp / "repo"
@@ -90,14 +98,10 @@ def resolve_source(arg: str) -> tuple:
                 ["git", "clone", "--depth", "1", "--quiet", arg, str(dest)],
                 capture_output=True, text=True, check=True,
             )
-        except FileNotFoundError:
-            cleanup(tmp)
-            raise GitskimError("git not found on PATH") from None
         except subprocess.CalledProcessError as e:
             cleanup(tmp)
             raise GitskimError(f"clone failed: {e.stderr.strip()}") from None
-        name = arg.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-        return dest, tmp, name
+        return dest, tmp, repo_name_from_url(arg)
 
     p = Path(arg).expanduser()
     if not p.is_dir():
@@ -138,9 +142,19 @@ DEFAULT_IGNORE = [
 ]
 
 
-def matches_any(rel: str, patterns: list) -> bool:
-    """fnmatch against the full relative path and the basename."""
+def matches_any(rel: str, patterns: list, casefold: bool = False) -> bool:
+    """fnmatch against the full relative path and the basename.
+
+    casefold=True compares lowercased path/name against lowercased patterns
+    (used for the built-in ignore list so LOGO.PNG is ignored like logo.png).
+    """
     name = rel.rsplit("/", 1)[-1]
+    if casefold:
+        rel, name = rel.lower(), name.lower()
+        return any(
+            fnmatch.fnmatchcase(rel, p.lower()) or fnmatch.fnmatchcase(name, p.lower())
+            for p in patterns
+        )
     return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(name, p) for p in patterns)
 
 
@@ -156,30 +170,38 @@ def is_binary(path: Path) -> bool:
 def collect_files(repo: Path, opts: Options) -> list:
     """List candidate files via git ls-files and apply the filter chain.
 
-    Filtered-out files are dropped. Too-large and binary files are kept with a
-    status so they still appear in the tree.
+    Order: --exclude always wins; an explicit --include match bypasses the
+    built-in ignore list (explicit beats default); otherwise the built-in
+    ignore list applies. Filtered-out files are dropped. Too-large, binary and
+    unreadable files are kept with a status so they still appear in the tree.
     """
     args = ["ls-files", "-z"]
     if opts.untracked:
         args += ["--cached", "--others", "--exclude-standard"]
     out = run_git(repo, *args)
     entries = []
-    for rel in sorted(filter(None, out.split("\0"))):
-        if opts.default_ignore and (in_ignored_dir(rel) or matches_any(rel, DEFAULT_IGNORE)):
-            continue
+    for rel in sorted(set(filter(None, out.split("\0")))):   # set: unmerged entries repeat
         if opts.exclude and matches_any(rel, opts.exclude):
             continue
-        if opts.include and not matches_any(rel, opts.include):
+        if opts.include:
+            if not matches_any(rel, opts.include):
+                continue
+        elif opts.default_ignore and (
+            in_ignored_dir(rel) or matches_any(rel, DEFAULT_IGNORE, casefold=True)
+        ):
             continue
         p = repo / rel
         if not p.is_file():          # submodule dirs, deleted-but-indexed files
             continue
-        size = p.stat().st_size
-        entry = FileEntry(path=rel, size=size)
-        if size > opts.max_size_kb * 1024:
-            entry.status = "too_large"
-        elif is_binary(p):
-            entry.status = "binary"
+        entry = FileEntry(path=rel, size=0)
+        try:
+            entry.size = p.stat().st_size
+            if entry.size > opts.max_size_kb * 1024:
+                entry.status = "too_large"
+            elif is_binary(p):
+                entry.status = "binary"
+        except OSError as ex:
+            entry.status, entry.note = "error", str(ex)
         entries.append(entry)
     return entries
 
