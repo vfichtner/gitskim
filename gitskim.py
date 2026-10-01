@@ -61,7 +61,58 @@ def warn(msg: str) -> None:
 
 # ── Git helpers ───────────────────────────────────────────────────────────────
 
-# (Task 2)
+URL_RE = re.compile(r"^(https?://|git@|ssh://|git://|file://)")
+
+
+def run_git(repo: Path, *args: str) -> str:
+    """Run a git command in repo and return stdout. Raises GitskimError on failure."""
+    try:
+        res = subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        )
+    except FileNotFoundError:
+        raise GitskimError("git not found on PATH") from None
+    except subprocess.CalledProcessError as e:
+        raise GitskimError(f"git {' '.join(args)} failed: {e.stderr.strip()}") from None
+    return res.stdout
+
+
+def resolve_source(arg: str) -> tuple:
+    """Return (repo_path, tempdir_or_None, repo_name).
+
+    URLs are shallow-cloned into a tempdir the caller must remove via cleanup().
+    """
+    if URL_RE.match(arg) or arg.endswith(".git"):
+        tmp = Path(tempfile.mkdtemp(prefix="gitskim-"))
+        dest = tmp / "repo"
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--quiet", arg, str(dest)],
+                capture_output=True, text=True, check=True,
+            )
+        except FileNotFoundError:
+            cleanup(tmp)
+            raise GitskimError("git not found on PATH") from None
+        except subprocess.CalledProcessError as e:
+            cleanup(tmp)
+            raise GitskimError(f"clone failed: {e.stderr.strip()}") from None
+        name = arg.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        return dest, tmp, name
+
+    p = Path(arg).expanduser()
+    if not p.is_dir():
+        raise GitskimError(f"not a directory: {arg}")
+    try:
+        top = run_git(p, "rev-parse", "--show-toplevel").strip()
+    except GitskimError:
+        raise GitskimError(f"not a git repository: {arg}") from None
+    top_path = Path(top).resolve()
+    return top_path, None, top_path.name
+
+
+def cleanup(tmp: Optional[Path]) -> None:
+    if tmp is not None:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── File collection ───────────────────────────────────────────────────────────

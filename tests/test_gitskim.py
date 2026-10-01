@@ -49,5 +49,49 @@ class TestCli(unittest.TestCase):
         self.assertIn("--full", res.stdout)
 
 
+class TestResolveSource(unittest.TestCase):
+    def test_local_repo_resolves_to_toplevel(self):
+        repo = make_repo({"a.txt": "a", "sub/b.txt": "b"})
+        path, tmp, name = gitskim.resolve_source(str(repo / "sub"))
+        self.assertEqual(path, repo.resolve())
+        self.assertIsNone(tmp)
+        self.assertEqual(name, repo.name)
+
+    def test_non_repo_raises(self):
+        plain = Path(tempfile.mkdtemp())
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.resolve_source(str(plain))
+
+    def test_missing_dir_raises(self):
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.resolve_source("/definitely/not/here")
+
+    def test_local_url_clone(self):
+        repo = make_repo({"a.txt": "a"})
+        path, tmp, name = gitskim.resolve_source(f"file://{repo}")
+        try:
+            self.assertTrue((path / "a.txt").exists())
+            self.assertIsNotNone(tmp)
+            self.assertEqual(name, repo.name)
+        finally:
+            gitskim.cleanup(tmp)
+        self.assertFalse(tmp.exists())
+
+    def test_bad_url_raises(self):
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.resolve_source("file:///nonexistent/repo.git")
+
+
+class TestRunGit(unittest.TestCase):
+    def test_run_git_returns_stdout(self):
+        repo = make_repo({"a.txt": "a"})
+        self.assertEqual(gitskim.run_git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
+
+    def test_run_git_failure_raises(self):
+        repo = make_repo({"a.txt": "a"})
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.run_git(repo, "rev-parse", "--verify", "nope")
+
+
 if __name__ == "__main__":
     unittest.main()
