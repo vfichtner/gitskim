@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -817,6 +818,24 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(out_path.exists())
         self.assertIn(str(out_path), res.stderr)
+        self.assertEqual([p.name for p in out_dir.iterdir()], ["out.md"])
+
+    def test_default_output_name_in_cwd(self):
+        cwd = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, cwd, ignore_errors=True)
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(self.repo)],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        files = [p.name for p in cwd.iterdir()]
+        self.assertEqual(len(files), 1)
+        self.assertRegex(files[0], rf"^{re.escape(self.repo.name)}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{4}}\.md$")
+        self.assertIn(files[0], res.stderr)
+
+    def test_default_output_name_format(self):
+        now = gitskim._dt.datetime(2026, 10, 12, 14, 32, 59)
+        self.assertEqual(gitskim.default_output_name("gitskim", now), "gitskim_2026-10-12_1432.md")
 
     def test_negative_max_size_rejected(self):
         res = self.run_cli("--max-size", "-1")

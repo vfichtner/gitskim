@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gitskim – skim a git repository into one compact Markdown file for LLM context.
 
-Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o SKIM.md]
+Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: <repo>_<YYYY-MM-DD_HHMM>.md)
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class FileEntry:
     commits: int = 0
     tokens: int = 0
     lang: str = ""
-    content: str = ""              # what goes into SKIM.md (skimmed or full)
+    content: str = ""              # what goes into the output file (skimmed or full)
     db_schema: list = field(default_factory=list)
 
 
@@ -793,7 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Skim a git repository into one compact Markdown file for LLM context.",
     )
     p.add_argument("source", help="local path or git URL")
-    p.add_argument("-o", "--output", default="SKIM.md", help="output file (default: SKIM.md)")
+    p.add_argument("-o", "--output", help="output file (default: <repo>_<YYYY-MM-DD_HHMM>.md)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
     p.add_argument("--full", action="store_true", help="full file contents instead of signatures")
     p.add_argument("--include", action="append", default=[], metavar="GLOB", help="only files matching GLOB (repeatable)")
@@ -810,6 +810,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 LARGE_FILE_TOKENS = 8000
+
+
+def default_output_name(name: str, now: Optional[_dt.datetime] = None) -> str:
+    """<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
+    return f"{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
 
 
 def repo_meta(repo: Path) -> tuple:
@@ -863,7 +868,7 @@ def main(argv: Optional[list] = None) -> int:
                 os.dup2(devnull, sys.stdout.fileno())
                 return 0
         else:
-            out_path = Path(args.output)
+            out_path = Path(args.output or default_output_name(name))
             out_path.write_text(md, encoding="utf-8")
             ok = sum(1 for e in entries if e.status == "ok")
             warn(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est.)")

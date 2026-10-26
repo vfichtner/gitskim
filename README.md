@@ -10,7 +10,7 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 
 ## Usage
 
-    python3 gitskim.py .                       # -> SKIM.md
+    python3 gitskim.py .                       # -> <repo>_2026-10-12_1432.md
     python3 gitskim.py ~/code/project -o ctx.md
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
@@ -18,7 +18,7 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-o FILE` | `SKIM.md` | output file |
+| `-o FILE` | `<repo>_<YYYY-MM-DD_HHMM>.md` | output file (written to the current directory by default) |
 | `--stdout` | | print instead of writing a file |
 | `--full` | off | full file contents instead of signatures |
 | `--include GLOB` | | only matching files (repeatable) |
@@ -32,6 +32,8 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `--no-secret-scan` | | disable secret heuristics |
 
 Requires Python ≥ 3.9 and `git` on PATH. The input must be a git repository (local path or clone URL).
+
+Without `-o`, every run writes a new timestamped file, so add `*_20??-??-??_????.md` to the `.gitignore` of the repos you skim.
 
 ### Filtering rules
 
