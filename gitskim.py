@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gitskim – skim a git repository into one compact Markdown file for LLM context.
 
-Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o SKIM.md]
+Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: <repo>_<YYYY-MM-DD_HHMM>.md)
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class FileEntry:
     commits: int = 0
     tokens: int = 0
     lang: str = ""
-    content: str = ""              # what goes into SKIM.md (skimmed or full)
+    content: str = ""              # what goes into the output file (skimmed or full)
     db_schema: list = field(default_factory=list)
 
 
@@ -839,7 +839,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Skim a git repository into one compact Markdown file for LLM context.",
     )
     p.add_argument("source", help="local path or git URL; a folder that is not a repo is scanned for repos")
-    p.add_argument("-o", "--output", help="output file (default: SKIM.md, or <name>.md with --output-dir)")
+    p.add_argument("-o", "--output", help="output file (default: <repo>_<YYYY-MM-DD_HHMM>.md)")
     p.add_argument("--output-dir", default=os.environ.get("GITSKIM_OUTPUT_DIR") or None, metavar="DIR",
                    help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
@@ -863,13 +863,18 @@ def build_parser() -> argparse.ArgumentParser:
 LARGE_FILE_TOKENS = 8000
 
 
+def default_output_name(name: str, now: Optional[_dt.datetime] = None) -> str:
+    """<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
+    return f"{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
+
+
 def output_path(output: Optional[str], output_dir: Optional[str], name: str) -> Path:
-    """-o alone: as given. --output-dir alone: DIR/<name>.md. Both: DIR/<-o> (unless -o is absolute)."""
+    """-o alone: as given. --output-dir alone: DIR/<default name>. Both: DIR/<-o> (unless -o is absolute)."""
     if not output_dir:
-        return Path(output or "SKIM.md")
+        return Path(output or default_output_name(name))
     d = Path(output_dir).expanduser()
     d.mkdir(parents=True, exist_ok=True)
-    return d / Path(output).expanduser() if output else d / f"{name}.md"
+    return d / Path(output).expanduser() if output else d / default_output_name(name)
 
 
 def repo_meta(repo: Path) -> tuple:

@@ -10,18 +10,18 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 
 ## Usage
 
-    python3 gitskim.py .                       # -> SKIM.md
+    python3 gitskim.py .                       # -> <repo>_2026-10-12_1432.md
     python3 gitskim.py ~/code/project -o ctx.md
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
-    python3 gitskim.py ~/code                   # folder of repos -> one combined SKIM.md
-    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/<repo-name>.md
+    python3 gitskim.py ~/code                   # folder of repos -> one combined file
+    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/<repo>_2026-10-12_1432.md
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-o FILE` | `SKIM.md` | output file |
-| `--output-dir DIR` | `$GITSKIM_OUTPUT_DIR` | write into DIR (created if missing) as `<name>.md`, or as `DIR/FILE` together with `-o` |
+| `-o FILE` | `<repo>_<YYYY-MM-DD_HHMM>.md` | output file (written to the current directory by default) |
+| `--output-dir DIR` | `$GITSKIM_OUTPUT_DIR` | write into DIR (created if missing) under the default name, or as `DIR/FILE` together with `-o` |
 | `--stdout` | | print instead of writing a file |
 | `--full` | off | full file contents instead of signatures |
 | `--include GLOB` | | only matching files (repeatable) |
@@ -47,6 +47,8 @@ If the path is a folder that is not itself inside a git repository, gitskim look
 - `--include` / `--exclude` match both the repo-relative and the prefixed path; `--exclude "legacy/*"` drops the `legacy` repo entirely.
 - With `--sort changes`, files from all repos are ranked together by commit count.
 - `--diff` / `--log` produce one subsection per repo.
+
+Without `-o`, every run writes a new timestamped file, so add `*_20??-??-??_????.md` to the `.gitignore` of the repos you skim.
 
 ### Filtering rules
 
