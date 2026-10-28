@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """gitskim – skim a git repository into one compact Markdown file for LLM context.
 
-Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o SKIM.md]
+Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: <repo>_<YYYY-MM-DD_HHMM>.md)
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import configparser
 import datetime as _dt
 import fnmatch
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
@@ -41,6 +43,7 @@ class Options:
     untracked: bool = False
     sort: str = "changes"
     secret_scan: bool = True
+    ignore_dirs: list = field(default_factory=list)   # extra directory names, from the config file
 
 
 @dataclass
@@ -52,12 +55,21 @@ class FileEntry:
     commits: int = 0
     tokens: int = 0
     lang: str = ""
-    content: str = ""              # what goes into SKIM.md (skimmed or full)
+    content: str = ""              # what goes into the output file (skimmed or full)
     db_schema: list = field(default_factory=list)
 
 
 def warn(msg: str) -> None:
     print(f"gitskim: {msg}", file=sys.stderr)
+
+
+QUIET = False                 # -q: progress messages off, warnings and errors stay
+PROGRESS_INTERVAL = 2.0       # seconds between "still working" lines on big repos
+
+
+def info(msg: str) -> None:
+    if not QUIET:
+        warn(msg)
 
 
 # ── Git helpers ───────────────────────────────────────────────────────────────
@@ -94,6 +106,7 @@ def resolve_source(arg: str) -> tuple:
     if URL_RE.match(arg) or arg.endswith(".git"):
         tmp = Path(tempfile.mkdtemp(prefix="gitskim-"))
         dest = tmp / "repo"
+        info(f"cloning {arg} …")
         try:
             subprocess.run(
                 ["git", "clone", "--depth", "1", "--quiet", arg, str(dest)],
@@ -115,7 +128,7 @@ def resolve_source(arg: str) -> tuple:
     return top_path, None, top_path.name
 
 
-def find_repos(root: Path, max_depth: int = 3) -> list:
+def find_repos(root: Path, max_depth: int = 3, skip_dirs: tuple = ()) -> list:
     """Git repositories below root (not root itself), up to max_depth levels deep.
 
     Does not descend into a found repo, hidden directories or IGNORE_DIRS.
@@ -133,7 +146,7 @@ def find_repos(root: Path, max_depth: int = 3) -> list:
         if depth >= max_depth:
             dirnames[:] = []
             continue
-        dirnames[:] = [n for n in dirnames if not n.startswith(".") and n not in IGNORE_DIRS]
+        dirnames[:] = [n for n in dirnames if not n.startswith(".") and n not in IGNORE_DIRS and n not in skip_dirs]
     return sorted(found)
 
 
@@ -214,6 +227,8 @@ def collect_files(repo: Path, opts: Options, prefix: str = "") -> list:
     entries = []
     for rel in sorted(set(filter(None, out.split("\0")))):   # set: unmerged entries repeat
         if opts.exclude and _user_match(rel, prefix, opts.exclude):
+            continue
+        if opts.ignore_dirs and set(rel.split("/")[:-1]) & set(opts.ignore_dirs):
             continue
         if opts.default_ignore and in_ignored_dir(rel):
             continue
@@ -838,13 +853,20 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gitskim",
         description="Skim a git repository into one compact Markdown file for LLM context.",
     )
-    p.add_argument("source", help="local path or git URL; a folder that is not a repo is scanned for repos")
-    p.add_argument("-o", "--output", default="SKIM.md", help="output file (default: SKIM.md)")
+    p.add_argument("source", nargs="*",
+                   help="project name(s) from the configured workspace, a local path or a git URL; "
+                        "a folder that is not a repo is scanned for repos (default: the whole workspace)")
+    p.add_argument("--config", metavar="FILE", help="config file (default: $GITSKIM_CONFIG or ~/.config/gitskim/config.ini)")
+    p.add_argument("--init-config", action="store_true", help="write a commented config template and exit")
+    p.add_argument("--list", action="store_true", help="list the projects in the configured workspace and exit")
+    p.add_argument("-o", "--output", help="output file (default: <repo>_<YYYY-MM-DD_HHMM>.md)")
+    p.add_argument("--output-dir", metavar="DIR",
+                   help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR, then output_dir from the config)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
     p.add_argument("--full", action="store_true", help="full file contents instead of signatures")
     p.add_argument("--include", action="append", default=[], metavar="GLOB", help="only files matching GLOB (repeatable)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB", help="skip files matching GLOB (repeatable)")
-    p.add_argument("--max-size", type=non_negative_int, default=100, metavar="KB", help="skip files larger than KB (default: 100)")
+    p.add_argument("--max-size", type=non_negative_int, metavar="KB", help="skip files larger than KB (default: 100)")
     p.add_argument("--no-default-ignore", action="store_true", help="disable built-in ignore list")
     p.add_argument("--untracked", action="store_true", help="include untracked (non-ignored) files")
     p.add_argument("--sort", choices=["changes", "path"], default="changes", help="file order (default: changes)")
@@ -852,13 +874,142 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", type=int, default=0, metavar="N", help="append last N commits")
     p.add_argument("--no-secret-scan", action="store_true", help="disable secret heuristics")
     p.add_argument("--multi", action="store_true", help="treat source as a folder of repos even if it is a repo itself")
-    p.add_argument("--scan-depth", type=non_negative_int, default=3, metavar="N",
+    p.add_argument("--scan-depth", type=non_negative_int, metavar="N",
                    help="how deep to look for repos in multi-repo mode (default: 3)")
+    p.add_argument("-q", "--quiet", action="store_true", help="no progress messages (warnings and errors are still shown)")
     p.add_argument("--version", action="version", version=f"gitskim {__version__}")
     return p
 
 
 LARGE_FILE_TOKENS = 8000
+
+
+# ── Config file ───────────────────────────────────────────────────────────────
+
+CONFIG_TEMPLATE = """\
+# gitskim configuration. Command-line flags win over these values;
+# --exclude adds to the list below instead of replacing it.
+
+[gitskim]
+# Folder that holds your git projects. `gitskim api` then skims <workspace>/api,
+# `gitskim api web` skims both into one file, plain `gitskim` the whole workspace.
+# Projects are found up to scan_depth levels deep and can be named by their
+# path below the workspace (team/web) or, if unique, by folder name (web).
+workspace = ~/code
+
+# Where output files go (overridden by --output-dir and $GITSKIM_OUTPUT_DIR).
+output_dir = ~/skims
+
+# File globs that are never included, one per line (or comma-separated).
+# Matched against the path inside the repo, the path below the workspace
+# (api/src/...) and the bare file name.
+exclude =
+    *.log
+    *.csv
+
+# Directory names that are skipped wherever they appear, in addition to
+# the built-in ones (node_modules, dist, build, .venv, ...).
+ignore_dirs =
+    generated
+
+# max_size = 100
+# scan_depth = 3
+"""
+
+CONFIG_KEYS = {"workspace", "output_dir", "exclude", "ignore_dirs", "max_size", "scan_depth"}
+
+
+@dataclass
+class Config:
+    path: Optional[Path] = None
+    workspace: Optional[Path] = None
+    output_dir: Optional[str] = None
+    exclude: list = field(default_factory=list)
+    ignore_dirs: list = field(default_factory=list)
+    max_size: Optional[int] = None
+    scan_depth: Optional[int] = None
+
+
+def default_config_path() -> Path:
+    if os.environ.get("GITSKIM_CONFIG"):
+        return Path(os.environ["GITSKIM_CONFIG"]).expanduser()
+    base = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
+    return Path(base).expanduser() / "gitskim" / "config.ini"
+
+
+def _config_list(value: str) -> list:
+    return [x.strip() for line in value.splitlines() for x in line.split(",") if x.strip()]
+
+
+def load_config(path: Optional[str]) -> Config:
+    """Read the [gitskim] section. A missing default file means no config; a missing --config file is an error."""
+    explicit = path is not None
+    p = Path(path).expanduser() if explicit else default_config_path()
+    if not p.is_file():
+        if explicit:
+            raise GitskimError(f"config file not found: {p}")
+        return Config()
+    cp = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
+    try:
+        cp.read(p, encoding="utf-8")
+    except configparser.Error as ex:
+        raise GitskimError(f"invalid config {p}: {ex}") from None
+    if not cp.has_section("gitskim"):
+        raise GitskimError(f"invalid config {p}: missing [gitskim] section")
+    sec = cp["gitskim"]
+    for key in sec:
+        if key not in CONFIG_KEYS:
+            warn(f"{p}: unknown key '{key}' ignored")
+    cfg = Config(path=p)
+    if sec.get("workspace", "").strip():
+        cfg.workspace = Path(sec["workspace"].strip()).expanduser()
+    cfg.output_dir = sec.get("output_dir", "").strip() or None
+    cfg.exclude = _config_list(sec.get("exclude", ""))
+    cfg.ignore_dirs = [d.strip("/") for d in _config_list(sec.get("ignore_dirs", ""))]
+    for key in ("max_size", "scan_depth"):
+        if sec.get(key, "").strip():
+            try:
+                value = int(sec[key])
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                raise GitskimError(f"invalid config {p}: {key} must be an integer >= 0") from None
+            setattr(cfg, key, value)
+    return cfg
+
+
+def init_config(path: Optional[str]) -> Path:
+    p = Path(path).expanduser() if path else default_config_path()
+    if p.exists():
+        raise GitskimError(f"config already exists: {p}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    return p
+
+
+def resolve_project(name: str, projects: list) -> Optional[str]:
+    """Match name against workspace-relative repo paths: exact path first, then unique folder name."""
+    name = name.strip("/")
+    if name in projects:
+        return name
+    hits = [rel for rel in projects if rel.rsplit("/", 1)[-1] == name]
+    if len(hits) > 1:
+        raise GitskimError(f"'{name}' is ambiguous in the workspace: {', '.join(hits)}")
+    return hits[0] if hits else None
+
+
+def default_output_name(name: str, now: Optional[_dt.datetime] = None) -> str:
+    """<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
+    return f"{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
+
+
+def output_path(output: Optional[str], output_dir: Optional[str], name: str) -> Path:
+    """-o alone: as given. --output-dir alone: DIR/<default name>. Both: DIR/<-o> (unless -o is absolute)."""
+    if not output_dir:
+        return Path(output or default_output_name(name))
+    d = Path(output_dir).expanduser()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / Path(output).expanduser() if output else d / default_output_name(name)
 
 
 def repo_meta(repo: Path) -> tuple:
@@ -870,11 +1021,17 @@ def repo_meta(repo: Path) -> tuple:
     return branch, commit
 
 
-def skim_repo(repo: Path, opts: Options, prefix: str = "") -> list:
+def skim_repo(repo: Path, opts: Options, prefix: str = "", label: str = "") -> list:
     """Collect, rank and process one repo. Entry paths get prefix prepended afterwards."""
+    label = label or prefix.rstrip("/") or repo.name
     entries = collect_files(repo, opts, prefix)
+    info(f"{label}: {_plural(len(entries), 'file')}")
     rank_files(repo, entries, opts.sort)
-    for e in entries:
+    last = time.monotonic()
+    for i, e in enumerate(entries, 1):
+        if time.monotonic() - last >= PROGRESS_INTERVAL:
+            info(f"{label}: {i}/{len(entries)} files …")
+            last = time.monotonic()
         try:
             process_file(repo, e, opts)
         except OSError as ex:
@@ -913,48 +1070,117 @@ def multi_repo_root(source: str, force: bool) -> Optional[Path]:
         return p
 
 
+def skim_many(root: Path, rels: list, opts: Options, args) -> tuple:
+    """Skim several repos below root into one entry list. Returns (entries, repos, diffs, logs)."""
+    entries, repos, diffs, logs = [], [], [], []
+    for i, rel in enumerate(rels, 1):
+        repo = root / rel
+        mine = skim_repo(repo, opts, prefix=rel + "/", label=f"[{i}/{len(rels)}] {rel}")
+        if not mine:                  # e.g. --exclude "legacy/*": leave the repo out entirely
+            continue
+        entries += mine
+        repos.append((rel, *repo_meta(repo)))
+        diff, log = recent_changes(repo, args)
+        diffs.append((rel, diff))
+        logs.append((rel, log))
+    if opts.sort == "changes":
+        entries.sort(key=lambda e: (-e.commits, e.path))
+    else:
+        entries.sort(key=lambda e: e.path)
+    if not repos:
+        raise GitskimError("all repositories were filtered out")
+    info(f"skimmed {_plural(len(repos), 'repository', 'repositories')}: {', '.join(r[0] for r in repos)}")
+    return entries, repos, diffs, logs
+
+
 def main(argv: Optional[list] = None) -> int:
+    global QUIET
     args = build_parser().parse_args(argv)
-    opts = Options(
-        full=args.full, include=args.include, exclude=args.exclude,
-        max_size_kb=args.max_size, default_ignore=not args.no_default_ignore,
-        untracked=args.untracked, sort=args.sort, secret_scan=not args.no_secret_scan,
-    )
+    QUIET = args.quiet
+    started = time.monotonic()
     tmp = None
     try:
+        if args.init_config:
+            warn(f"wrote {init_config(args.config)}")
+            return 0
+        cfg = load_config(args.config)
+        scan_depth = args.scan_depth if args.scan_depth is not None else (cfg.scan_depth if cfg.scan_depth is not None else 3)
+        opts = Options(
+            full=args.full, include=args.include, exclude=cfg.exclude + args.exclude,
+            max_size_kb=args.max_size if args.max_size is not None else (cfg.max_size if cfg.max_size is not None else 100),
+            default_ignore=not args.no_default_ignore, untracked=args.untracked, sort=args.sort,
+            secret_scan=not args.no_secret_scan, ignore_dirs=cfg.ignore_dirs,
+        )
+        output_dir = args.output_dir or os.environ.get("GITSKIM_OUTPUT_DIR") or cfg.output_dir
         if shutil.which("git") is None:
             raise GitskimError("git not found on PATH")
-        root = multi_repo_root(args.source, args.multi)
-        if root is not None:
-            found = find_repos(root, args.scan_depth)
-            if not found:
-                what = "no git repositories found below" if args.multi else "not a git repository and no git repositories found below it:"
-                raise GitskimError(f"{what} {args.source}")
-            name, entries, repos, diffs, logs = root.resolve().name, [], [], [], []
-            for rel in found:
-                repo = root / rel
-                mine = skim_repo(repo, opts, prefix=rel + "/")
-                if not mine:                  # e.g. --exclude "legacy/*": leave the repo out entirely
-                    continue
-                entries += mine
-                repos.append((rel, *repo_meta(repo)))
-                diff, log = recent_changes(repo, args)
-                diffs.append((rel, diff))
-                logs.append((rel, log))
-            if opts.sort == "changes":
-                entries.sort(key=lambda e: (-e.commits, e.path))
-            else:
-                entries.sort(key=lambda e: e.path)
-            if not repos:
-                raise GitskimError("all repositories were filtered out")
-            warn(f"skimmed {_plural(len(repos), 'repository', 'repositories')}: {', '.join(r[0] for r in repos)}")
-            branch = commit = "-"
+
+        projects = None
+        if cfg.workspace is not None:
+            if not cfg.workspace.is_dir():
+                raise GitskimError(f"workspace from {cfg.path} is not a directory: {cfg.workspace}")
+            projects = find_repos(cfg.workspace, scan_depth, tuple(cfg.ignore_dirs))
+        if args.list:
+            if projects is None:
+                raise GitskimError(f"no workspace configured (see --init-config, config: {default_config_path()})")
+            print("\n".join(projects))
+            return 0
+
+        # Which repos? Workspace project names, else one path/URL.
+        sources = args.source
+        if not sources:
+            if projects is None:
+                raise GitskimError("no source given and no workspace configured (see --init-config)")
+            sources_rel = projects
         else:
-            repo, tmp, name = resolve_source(args.source)
-            entries = skim_repo(repo, opts)
-            branch, commit = repo_meta(repo)
-            diffs, logs = recent_changes(repo, args)
-            repos = None
+            sources_rel = [resolve_project(src, projects) for src in sources] if projects else [None] * len(sources)
+            if None in sources_rel:
+                if len(sources) > 1:
+                    bad = [s for s, r in zip(sources, sources_rel) if r is None]
+                    raise GitskimError(f"unknown project(s) in workspace {cfg.workspace}: {', '.join(bad)}"
+                                       if projects is not None else "several sources need a configured workspace")
+                sources_rel = None
+        if sources_rel is not None:
+            if not sources_rel:
+                raise GitskimError(f"no git repositories found in workspace {cfg.workspace}")
+            rels = list(dict.fromkeys(sources_rel))          # dedupe, keep order
+            if not args.source:
+                name = cfg.workspace.resolve().name
+            else:
+                name = "+".join(r.rsplit("/", 1)[-1] for r in rels)
+            if len(rels) == 1 and args.source:
+                repo = cfg.workspace / rels[0]
+                entries = skim_repo(repo, opts)
+                branch, commit = repo_meta(repo)
+                diffs, logs = recent_changes(repo, args)
+                repos = None
+            else:
+                entries, repos, diffs, logs = skim_many(cfg.workspace, rels, opts, args)
+                branch = commit = "-"
+        else:
+            source = sources[0]
+            root = multi_repo_root(source, args.multi)
+            if root is not None:
+                found = find_repos(root, scan_depth, tuple(cfg.ignore_dirs))
+                if not found:
+                    what = "no git repositories found below" if args.multi else "not a git repository and no git repositories found below it:"
+                    hint = f" (and no such project in workspace {cfg.workspace})" if projects is not None else ""
+                    raise GitskimError(f"{what} {source}{hint}")
+                name = root.resolve().name
+                entries, repos, diffs, logs = skim_many(root, found, opts, args)
+                branch = commit = "-"
+            else:
+                try:
+                    repo, tmp, name = resolve_source(source)
+                except GitskimError as ex:
+                    if projects is not None and not (URL_RE.match(source) or Path(source).expanduser().exists()):
+                        raise GitskimError(f"unknown project '{source}' in workspace {cfg.workspace}; "
+                                           f"available: {', '.join(projects) or '(none)'}") from None
+                    raise ex
+                entries = skim_repo(repo, opts, label=name)
+                branch, commit = repo_meta(repo)
+                diffs, logs = recent_changes(repo, args)
+                repos = None
         for e in entries:
             if e.status == "secret":
                 warn(f"skipped {e.path}: possible secret ({e.note})")
@@ -969,11 +1195,17 @@ def main(argv: Optional[list] = None) -> int:
                 devnull = os.open(os.devnull, os.O_WRONLY)
                 os.dup2(devnull, sys.stdout.fileno())
                 return 0
+            info(f"done ({sum(1 for e in entries if e.status == 'ok')} files, "
+                 f"~{fmt_tokens(estimate_tokens(md))} tokens est., {time.monotonic() - started:.1f}s)")
         else:
-            out_path = Path(args.output)
-            out_path.write_text(md, encoding="utf-8")
+            try:
+                out_path = output_path(args.output, output_dir, name)
+                out_path.write_text(md, encoding="utf-8")
+            except OSError as ex:
+                raise GitskimError(f"cannot write output: {ex}") from None
             ok = sum(1 for e in entries if e.status == "ok")
-            warn(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est.)")
+            info(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est., "
+                 f"{time.monotonic() - started:.1f}s)")
         return 0
     except GitskimError as ex:
         warn(str(ex))
