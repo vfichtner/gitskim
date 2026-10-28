@@ -15,6 +15,7 @@ Skim a git repository into **one compact Markdown file** for LLM context.
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
+    python3 gitskim.py ~/code                   # folder of repos -> one combined SKIM.md
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -30,8 +31,20 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `--diff` | off | append `git diff` + staged diff |
 | `--log N` | `0` | append last N commits |
 | `--no-secret-scan` | | disable secret heuristics |
+| `--multi` | | scan the folder for repos even if it is a repo itself |
+| `--scan-depth N` | `3` | how deep to look for repos in multi-repo mode |
 
-Requires Python ≥ 3.9 and `git` on PATH. The input must be a git repository (local path or clone URL).
+Requires Python ≥ 3.9 and `git` on PATH. The input must be a git repository (local path or clone URL) or a folder containing git repositories.
+
+### Multiple repositories
+
+If the path is a folder that is not itself inside a git repository, gitskim looks for repositories below it (up to `--scan-depth` levels, skipping hidden and ignored directories, not descending into a found repo) and skims them all into one file. Use `--multi` to force this for a folder that is a repo itself.
+
+- File paths are prefixed with the repo's path relative to the folder (`api/src/app.py`), so the tree, tables and file sections cover all repos together.
+- A `## Repositories` table lists branch, commit, file count and tokens per repo.
+- `--include` / `--exclude` match both the repo-relative and the prefixed path; `--exclude "legacy/*"` drops the `legacy` repo entirely.
+- With `--sort changes`, files from all repos are ranked together by commit count.
+- `--diff` / `--log` produce one subsection per repo.
 
 ### Filtering rules
 

@@ -1,8 +1,14 @@
 # gitskim
-Branch main @ e235b5d · 2026-10-01 · 6/6 files · ~4.3k tokens (est.) · mode: skim
+Branch claude/dazzling-hamilton-774tsf @ e9d53cb · 2026-10-28 · 9/9 files · ~5.2k tokens (est.) · mode: skim
 
 ## Structure
 ```
+├── docs/
+│   └── plans/
+│       ├── 2026-10-01-gitskim-design.md
+│       └── 2026-10-01-gitskim-implementation.md
+├── examples/
+│   └── SKIM-self.md
 ├── tests/
 │   ├── __init__.py
 │   └── test_gitskim.py
@@ -16,16 +22,19 @@ Branch main @ e235b5d · 2026-10-01 · 6/6 files · ~4.3k tokens (est.) · mode:
 
 | File | Commits | ~Tokens |
 |---|---:|---:|
-| README.md | 2 | 1.4k |
-| tests/test_gitskim.py | 17 | 1.3k |
-| gitskim.py | 16 | 1.3k |
+| README.md | 2 | 1.6k |
+| gitskim.py | 16 | 1.5k |
+| tests/test_gitskim.py | 17 | 1.4k |
 | LICENSE | 1 | 267 |
+| docs/plans/2026-10-01-gitskim-implementation.md | 1 | 148 |
+| examples/SKIM-self.md | 3 | 65 |
+| docs/plans/2026-10-01-gitskim-design.md | 2 | 64 |
 | .gitignore | 1 | 9 |
 | tests/__init__.py | 1 | 0 |
 
 ## Files
 
-### tests/test_gitskim.py · 17 commits · ~1.3k tokens
+### tests/test_gitskim.py · 17 commits · ~1.4k tokens
 ```python
 from __future__ import annotations
 import shutil
@@ -169,12 +178,20 @@ class TestEndToEnd(unittest.TestCase):
     def test_negative_max_size_rejected(self): ...
     def test_not_a_repo_exits_1(self): ...
 
+class TestMultiRepo(unittest.TestCase):
+    def setUp(self): ...
+    def run_cli(self, *args, source=None): ...
+    def test_find_repos(self): ...
+    def test_combined_output(self): ...
+    def test_exclude_drops_whole_repo(self): ...
+    def test_multi_flag_on_repo(self): ...
+
 class TestDiffAndLog(unittest.TestCase):
     def test_log_and_diff_sections(self): ...
     def test_no_section_without_flags(self): ...
 ```
 
-### gitskim.py · 16 commits · ~1.3k tokens
+### gitskim.py · 16 commits · ~1.5k tokens
 ````python
 """gitskim – skim a git repository into one compact Markdown file for LLM context."""
 from __future__ import annotations
@@ -232,6 +249,9 @@ def repo_name_from_url(url: str) -> str:
 def resolve_source(arg: str) -> tuple:
     """Return (repo_path, tempdir_or_None, repo_name)."""
 
+def find_repos(root: Path, max_depth: int=3) -> list:
+    """Git repositories below root (not root itself), up to max_depth levels deep."""
+
 def cleanup(tmp: Optional[Path]) -> None: ...
 
 IGNORE_DIRS = ...
@@ -239,11 +259,13 @@ DEFAULT_IGNORE = ...
 def matches_any(rel: str, patterns: list, casefold: bool=False) -> bool:
     """fnmatch against the full relative path and the basename."""
 
+def _user_match(rel: str, prefix: str, patterns: list) -> bool: ...
+
 def in_ignored_dir(rel: str) -> bool: ...
 
 def is_binary(path: Path) -> bool: ...
 
-def collect_files(repo: Path, opts: Options) -> list:
+def collect_files(repo: Path, opts: Options, prefix: str='') -> list:
     """List candidate files via git ls-files and apply the filter chain."""
 
 def rank_files(repo: Path, entries: list, sort: str='changes', max_commits: int=500) -> list:
@@ -342,9 +364,13 @@ def process_file(repo: Path, e: FileEntry, opts: Options) -> None:
 def _fence(content: str) -> str:
     """Backtick fence one longer than the longest backtick run in content (min 3)."""
 
-def _plural(n: int, word: str) -> str: ...
+def _plural(n: int, word: str, plural: str='') -> str: ...
 
-def render(name: str, branch: str, commit: str, entries: list, opts: Options, diff: str='', log: str='') -> str: ...
+def _labelled(x) -> list:
+    """diff/log are a plain string (one repo) or [(repo_name, text), ...] (multi-repo)."""
+
+def render(name: str, branch: str, commit: str, entries: list, opts: Options, diff='', log='', repos: Optional[list]=None) -> str:
+    """repos: [(name, branch, commit), ...] in multi-repo mode; branch/commit are then ignored."""
 
 def non_negative_int(value: str) -> int: ...
 
@@ -353,10 +379,31 @@ def build_parser() -> argparse.ArgumentParser: ...
 LARGE_FILE_TOKENS = ...
 def repo_meta(repo: Path) -> tuple: ...
 
+def skim_repo(repo: Path, opts: Options, prefix: str='') -> list:
+    """Collect, rank and process one repo. Entry paths get prefix prepended afterwards."""
+
+def recent_changes(repo: Path, args) -> tuple: ...
+
+def multi_repo_root(source: str, force: bool) -> Optional[Path]:
+    """The folder to scan for repos, or None for normal single-repo mode."""
+
 def main(argv: Optional[list]=None) -> int: ...
 ````
 
+### examples/SKIM-self.md · 3 commits · ~65 tokens
+```markdown
+# gitskim
+## Structure
+## Largest files
+## Files
+### tests/test_gitskim.py · 17 commits · ~1.3k tokens
+### gitskim.py · 16 commits · ~1.3k tokens
 ### README.md · 2 commits · ~1.4k tokens
+### .gitignore · 1 commit · ~9 tokens
+### LICENSE · 1 commit · ~267 tokens
+```
+
+### README.md · 2 commits · ~1.6k tokens
 ```markdown
 # gitskim
 
@@ -375,6 +422,7 @@ Skim a git repository into **one compact Markdown file** for LLM context.
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
+    python3 gitskim.py ~/code                   # folder of repos -> one combined SKIM.md
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -390,8 +438,20 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `--diff` | off | append `git diff` + staged diff |
 | `--log N` | `0` | append last N commits |
 | `--no-secret-scan` | | disable secret heuristics |
+| `--multi` | | scan the folder for repos even if it is a repo itself |
+| `--scan-depth N` | `3` | how deep to look for repos in multi-repo mode |
 
-Requires Python ≥ 3.9 and `git` on PATH. The input must be a git repository (local path or clone URL).
+Requires Python ≥ 3.9 and `git` on PATH. The input must be a git repository (local path or clone URL) or a folder containing git repositories.
+
+### Multiple repositories
+
+If the path is a folder that is not itself inside a git repository, gitskim looks for repositories below it (up to `--scan-depth` levels, skipping hidden and ignored directories, not descending into a found repo) and skims them all into one file. Use `--multi` to force this for a folder that is a repo itself.
+
+- File paths are prefixed with the repo's path relative to the folder (`api/src/app.py`), so the tree, tables and file sections cover all repos together.
+- A `## Repositories` table lists branch, commit, file count and tokens per repo.
+- `--include` / `--exclude` match both the repo-relative and the prefixed path; `--exclude "legacy/*"` drops the `legacy` repo entirely.
+- With `--sort changes`, files from all repos are ranked together by commit count.
+- `--diff` / `--log` produce one subsection per repo.
 
 ### Filtering rules
 
@@ -452,6 +512,25 @@ If you need exact token counts, many languages with precise parsing, or an MCP s
 MIT License.
 ```
 
+### docs/plans/2026-10-01-gitskim-design.md · 2 commits · ~64 tokens
+```markdown
+# gitskim – Design (v1)
+## Was es ist
+## Nicht-Ziele (v1)
+## CLI
+## Architektur
+## Dateiauswahl
+## Ranking
+## Skim-Modus (Default)
+## Liquibase-/DB-Skimmer
+## Secret-Scan
+## Output `SKIM.md`
+## Fehlerbehandlung
+## Tests
+## Repo-Layout
+## Spaeter (nicht v1)
+```
+
 ### .gitignore · 1 commit · ~9 tokens
 ```
 __pycache__/
@@ -483,4 +562,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### docs/plans/2026-10-01-gitskim-implementation.md · 1 commit · ~148 tokens
+```markdown
+# gitskim v1 Implementation Plan
+## Task 1: Scaffold, CLI skeleton, test harness
+## Task 2: Git helpers and `resolve_source`
+## Task 3: `collect_files` with filter chain
+## Task 4: `rank_files` by change frequency
+## Task 5: Token estimate and secret scan
+## Task 6: Python skimmer via `ast`
+## Task 7: Regex skimmer, Markdown skimmer, skimmer registry
+## Task 8: Liquibase / SQL changelog skimmer
+## Task 9: Directory tree rendering
+## Task 10: `process_file`, `render`, `main` wiring (end to end)
+## Task 11: `--diff` and `--log`
+## Task 12: README, dogfooding example, push
+## Done criteria
 ```

@@ -834,6 +834,54 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("not a git repository", res.stderr)
 
 
+class TestMultiRepo(unittest.TestCase):
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="gitskim-ws-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        for rel, extra in (("api", {"app.py": "def g() -> int:\n    return 2\n"}), ("team/web", None), ("legacy", None)):
+            repo = make_repo({"app.py": "def g() -> int:\n    return 1\n", "README.md": f"# {rel}\n"}, extra, case=self)
+            dest = self.ws / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(repo), str(dest))
+        (self.ws / "notes").mkdir()                             # plain dir, not a repo
+        (self.ws / "node_modules" / "pkg").mkdir(parents=True)
+        git(self.ws / "node_modules" / "pkg", "init", "-q")      # ignored dir: not scanned
+
+    def run_cli(self, *args, source=None):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(source or self.ws), "--stdout", *args],
+            capture_output=True, text=True,
+        )
+
+    def test_find_repos(self):
+        self.assertEqual(gitskim.find_repos(self.ws), ["api", "legacy", "team/web"])
+        self.assertEqual(gitskim.find_repos(self.ws, max_depth=1), ["api", "legacy"])
+
+    def test_combined_output(self):
+        res = self.run_cli("--log", "5")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = res.stdout
+        self.assertTrue(out.startswith(f"# {self.ws.name}\n3 repositories · "))
+        self.assertIn("## Repositories", out)
+        self.assertIn("| team/web | main |", out)
+        self.assertIn("### team/web/app.py", out)
+        self.assertIn("### git log · api", out)
+        # ranking spans repos: api/app.py has 2 commits
+        self.assertLess(out.index("### api/app.py · 2 commits"), out.index("### legacy/app.py"))
+        self.assertNotIn("node_modules", out)
+
+    def test_exclude_drops_whole_repo(self):
+        res = self.run_cli("--exclude", "legacy/*", "--log", "1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("2 repositories", res.stdout)
+        self.assertNotIn("legacy", res.stdout)
+
+    def test_multi_flag_on_repo(self):
+        res = self.run_cli("--multi", source=self.ws / "api")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("no git repositories found", res.stderr)
+
+
 class TestDiffAndLog(unittest.TestCase):
     def test_log_and_diff_sections(self):
         repo = make_repo({"a.py": "x = 1\n"}, extra_commits={"a.py": "x = 2\n"}, case=self)
