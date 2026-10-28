@@ -16,10 +16,12 @@ Skim a git repository into **one compact Markdown file** for LLM context.
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
     python3 gitskim.py ~/code                   # folder of repos -> one combined SKIM.md
+    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/<repo-name>.md
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-o FILE` | `SKIM.md` | output file |
+| `--output-dir DIR` | `$GITSKIM_OUTPUT_DIR` | write into DIR (created if missing) as `<name>.md`, or as `DIR/FILE` together with `-o` |
 | `--stdout` | | print instead of writing a file |
 | `--full` | off | full file contents instead of signatures |
 | `--include GLOB` | | only matching files (repeatable) |

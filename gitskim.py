@@ -839,7 +839,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Skim a git repository into one compact Markdown file for LLM context.",
     )
     p.add_argument("source", help="local path or git URL; a folder that is not a repo is scanned for repos")
-    p.add_argument("-o", "--output", default="SKIM.md", help="output file (default: SKIM.md)")
+    p.add_argument("-o", "--output", help="output file (default: SKIM.md, or <name>.md with --output-dir)")
+    p.add_argument("--output-dir", default=os.environ.get("GITSKIM_OUTPUT_DIR") or None, metavar="DIR",
+                   help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
     p.add_argument("--full", action="store_true", help="full file contents instead of signatures")
     p.add_argument("--include", action="append", default=[], metavar="GLOB", help="only files matching GLOB (repeatable)")
@@ -859,6 +861,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 LARGE_FILE_TOKENS = 8000
+
+
+def output_path(output: Optional[str], output_dir: Optional[str], name: str) -> Path:
+    """-o alone: as given. --output-dir alone: DIR/<name>.md. Both: DIR/<-o> (unless -o is absolute)."""
+    if not output_dir:
+        return Path(output or "SKIM.md")
+    d = Path(output_dir).expanduser()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / Path(output).expanduser() if output else d / f"{name}.md"
 
 
 def repo_meta(repo: Path) -> tuple:
@@ -970,8 +981,11 @@ def main(argv: Optional[list] = None) -> int:
                 os.dup2(devnull, sys.stdout.fileno())
                 return 0
         else:
-            out_path = Path(args.output)
-            out_path.write_text(md, encoding="utf-8")
+            try:
+                out_path = output_path(args.output, args.output_dir, name)
+                out_path.write_text(md, encoding="utf-8")
+            except OSError as ex:
+                raise GitskimError(f"cannot write output: {ex}") from None
             ok = sum(1 for e in entries if e.status == "ok")
             warn(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est.)")
         return 0

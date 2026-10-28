@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -817,6 +818,28 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(out_path.exists())
         self.assertIn(str(out_path), res.stderr)
+
+    def test_output_dir(self):
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        target = out_dir / "nested"
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(self.repo), "--output-dir", str(target)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((target / f"{self.repo.name}.md").exists())
+
+    def test_output_dir_from_env_with_filename(self):
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        env = {**os.environ, "GITSKIM_OUTPUT_DIR": str(out_dir)}
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), str(self.repo), "-o", "ctx.md"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((out_dir / "ctx.md").exists())
 
     def test_negative_max_size_rejected(self):
         res = self.run_cli("--max-size", "-1")
