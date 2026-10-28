@@ -14,6 +14,11 @@ sys.path.insert(0, str(ROOT))
 
 import gitskim  # noqa: E402
 
+# Keep a developer's own ~/.config/gitskim/config.ini and env out of the tests
+# (subprocesses inherit os.environ).
+os.environ["GITSKIM_CONFIG"] = str(Path(tempfile.gettempdir()) / "gitskim-test-no-config.ini")
+os.environ.pop("GITSKIM_OUTPUT_DIR", None)
+
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
@@ -925,6 +930,99 @@ class TestMultiRepo(unittest.TestCase):
         res = self.run_cli("--multi", source=self.ws / "api")
         self.assertEqual(res.returncode, 1)
         self.assertIn("no git repositories found", res.stderr)
+
+
+class TestConfig(unittest.TestCase):
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="gitskim-ws-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        for rel in ("api", "team/web", "other/web"):
+            repo = make_repo({"app.py": "def g() -> int:\n    return 1\n", "data.csv": "a,b\n",
+                              "generated/x.py": "X = 1\n"}, case=self)
+            dest = self.ws / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(repo), str(dest))
+        self.out = self.ws.parent / (self.ws.name + "-out")
+        self.addCleanup(shutil.rmtree, self.out, ignore_errors=True)
+        self.cfg = self.ws.parent / (self.ws.name + ".ini")
+        self.addCleanup(lambda: self.cfg.unlink(missing_ok=True))
+        self.cfg.write_text(
+            f"[gitskim]\nworkspace = {self.ws}\noutput_dir = {self.out}\n"
+            "exclude =\n    *.csv\nignore_dirs = generated\nmax_size = 50\n", encoding="utf-8")
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "gitskim.py"), "--config", str(self.cfg), *args],
+            capture_output=True, text=True, cwd=self.ws,
+        )
+
+    def test_load_config(self):
+        cfg = gitskim.load_config(str(self.cfg))
+        self.assertEqual(cfg.workspace, self.ws)
+        self.assertEqual(cfg.exclude, ["*.csv"])
+        self.assertEqual(cfg.ignore_dirs, ["generated"])
+        self.assertEqual(cfg.max_size, 50)
+
+    def test_missing_default_config_is_fine_missing_explicit_is_not(self):
+        self.assertIsNone(gitskim.load_config(None).workspace)
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.load_config(str(self.ws / "nope.ini"))
+
+    def test_invalid_number(self):
+        self.cfg.write_text("[gitskim]\nmax_size = big\n", encoding="utf-8")
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.load_config(str(self.cfg))
+
+    def test_resolve_project(self):
+        projects = ["api", "other/web", "team/web"]
+        self.assertEqual(gitskim.resolve_project("api", projects), "api")
+        self.assertEqual(gitskim.resolve_project("team/web", projects), "team/web")
+        self.assertIsNone(gitskim.resolve_project("nope", projects))
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.resolve_project("web", projects)
+
+    def test_project_by_name_writes_to_output_dir(self):
+        res = self.run_cli("api")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        files = list(self.out.iterdir())
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0].name.startswith("api_"))
+        md = files[0].read_text(encoding="utf-8")
+        self.assertTrue(md.startswith("# api\n"))
+        self.assertIn("### app.py", md)
+        self.assertNotIn("data.csv", md)            # config exclude
+        self.assertNotIn("generated", md)           # config ignore_dirs
+
+    def test_cli_exclude_adds_to_config(self):
+        res = self.run_cli("api", "--stdout", "--exclude", "app.py")
+        self.assertNotIn("app.py", res.stdout)
+        self.assertNotIn("data.csv", res.stdout)
+
+    def test_several_projects_and_whole_workspace(self):
+        res = self.run_cli("api", "team/web", "--stdout")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("2 repositories", res.stdout)
+        self.assertIn("### team/web/app.py", res.stdout)
+        res = self.run_cli("--stdout")
+        self.assertIn("3 repositories", res.stdout)
+
+    def test_list_and_unknown_project(self):
+        res = self.run_cli("--list")
+        self.assertEqual(res.stdout.split(), ["api", "other/web", "team/web"])
+        res = self.run_cli("nope")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("unknown project 'nope'", res.stderr)
+        self.assertIn("available: api", res.stderr)
+
+    def test_init_config(self):
+        target = self.ws / "cfg" / "config.ini"
+        res = subprocess.run([sys.executable, str(ROOT / "gitskim.py"), "--init-config", "--config", str(target)],
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIsNone(gitskim.load_config(str(target)).max_size)    # template parses
+        res = subprocess.run([sys.executable, str(ROOT / "gitskim.py"), "--init-config", "--config", str(target)],
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 1)
 
 
 class TestDiffAndLog(unittest.TestCase):
