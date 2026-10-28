@@ -39,6 +39,9 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `--config FILE` | `$GITSKIM_CONFIG` or `~/.config/gitskim/config.ini` | config file |
 | `--init-config` | | write a commented config template and exit |
 | `--list` | | list the projects in the configured workspace and exit |
+| `-q`, `--quiet` | | no progress messages; warnings and errors still go to stderr |
+
+Progress goes to stderr: one line per repo with its file count, a `n/total files …` line every 2 s on large repos, and the output path and run time at the end.
 
 Requires Python ≥ 3.9 and `git` on PATH. The input must be a git repository (local path or clone URL), a folder containing git repositories, or project names from the configured workspace.
 

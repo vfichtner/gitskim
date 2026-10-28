@@ -920,6 +920,14 @@ class TestMultiRepo(unittest.TestCase):
         self.assertLess(out.index("### api/app.py · 2 commits"), out.index("### legacy/app.py"))
         self.assertNotIn("node_modules", out)
 
+    def test_progress_messages_and_quiet(self):
+        res = self.run_cli()
+        self.assertIn("[1/3] api: 2 files", res.stderr)
+        self.assertIn("done (", res.stderr)
+        res = self.run_cli("-q")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stderr, "")
+
     def test_exclude_drops_whole_repo(self):
         res = self.run_cli("--exclude", "legacy/*", "--log", "1")
         self.assertEqual(res.returncode, 0, res.stderr)

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
@@ -62,6 +63,15 @@ def warn(msg: str) -> None:
     print(f"gitskim: {msg}", file=sys.stderr)
 
 
+QUIET = False                 # -q: progress messages off, warnings and errors stay
+PROGRESS_INTERVAL = 2.0       # seconds between "still working" lines on big repos
+
+
+def info(msg: str) -> None:
+    if not QUIET:
+        warn(msg)
+
+
 # ── Git helpers ───────────────────────────────────────────────────────────────
 
 URL_RE = re.compile(r"^(https?://|git@|ssh://|git://|file://)")
@@ -96,6 +106,7 @@ def resolve_source(arg: str) -> tuple:
     if URL_RE.match(arg) or arg.endswith(".git"):
         tmp = Path(tempfile.mkdtemp(prefix="gitskim-"))
         dest = tmp / "repo"
+        info(f"cloning {arg} …")
         try:
             subprocess.run(
                 ["git", "clone", "--depth", "1", "--quiet", arg, str(dest)],
@@ -865,6 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--multi", action="store_true", help="treat source as a folder of repos even if it is a repo itself")
     p.add_argument("--scan-depth", type=non_negative_int, metavar="N",
                    help="how deep to look for repos in multi-repo mode (default: 3)")
+    p.add_argument("-q", "--quiet", action="store_true", help="no progress messages (warnings and errors are still shown)")
     p.add_argument("--version", action="version", version=f"gitskim {__version__}")
     return p
 
@@ -1009,11 +1021,17 @@ def repo_meta(repo: Path) -> tuple:
     return branch, commit
 
 
-def skim_repo(repo: Path, opts: Options, prefix: str = "") -> list:
+def skim_repo(repo: Path, opts: Options, prefix: str = "", label: str = "") -> list:
     """Collect, rank and process one repo. Entry paths get prefix prepended afterwards."""
+    label = label or prefix.rstrip("/") or repo.name
     entries = collect_files(repo, opts, prefix)
+    info(f"{label}: {_plural(len(entries), 'file')}")
     rank_files(repo, entries, opts.sort)
-    for e in entries:
+    last = time.monotonic()
+    for i, e in enumerate(entries, 1):
+        if time.monotonic() - last >= PROGRESS_INTERVAL:
+            info(f"{label}: {i}/{len(entries)} files …")
+            last = time.monotonic()
         try:
             process_file(repo, e, opts)
         except OSError as ex:
@@ -1055,9 +1073,9 @@ def multi_repo_root(source: str, force: bool) -> Optional[Path]:
 def skim_many(root: Path, rels: list, opts: Options, args) -> tuple:
     """Skim several repos below root into one entry list. Returns (entries, repos, diffs, logs)."""
     entries, repos, diffs, logs = [], [], [], []
-    for rel in rels:
+    for i, rel in enumerate(rels, 1):
         repo = root / rel
-        mine = skim_repo(repo, opts, prefix=rel + "/")
+        mine = skim_repo(repo, opts, prefix=rel + "/", label=f"[{i}/{len(rels)}] {rel}")
         if not mine:                  # e.g. --exclude "legacy/*": leave the repo out entirely
             continue
         entries += mine
@@ -1071,12 +1089,15 @@ def skim_many(root: Path, rels: list, opts: Options, args) -> tuple:
         entries.sort(key=lambda e: e.path)
     if not repos:
         raise GitskimError("all repositories were filtered out")
-    warn(f"skimmed {_plural(len(repos), 'repository', 'repositories')}: {', '.join(r[0] for r in repos)}")
+    info(f"skimmed {_plural(len(repos), 'repository', 'repositories')}: {', '.join(r[0] for r in repos)}")
     return entries, repos, diffs, logs
 
 
 def main(argv: Optional[list] = None) -> int:
+    global QUIET
     args = build_parser().parse_args(argv)
+    QUIET = args.quiet
+    started = time.monotonic()
     tmp = None
     try:
         if args.init_config:
@@ -1156,7 +1177,7 @@ def main(argv: Optional[list] = None) -> int:
                         raise GitskimError(f"unknown project '{source}' in workspace {cfg.workspace}; "
                                            f"available: {', '.join(projects) or '(none)'}") from None
                     raise ex
-                entries = skim_repo(repo, opts)
+                entries = skim_repo(repo, opts, label=name)
                 branch, commit = repo_meta(repo)
                 diffs, logs = recent_changes(repo, args)
                 repos = None
@@ -1174,6 +1195,8 @@ def main(argv: Optional[list] = None) -> int:
                 devnull = os.open(os.devnull, os.O_WRONLY)
                 os.dup2(devnull, sys.stdout.fileno())
                 return 0
+            info(f"done ({sum(1 for e in entries if e.status == 'ok')} files, "
+                 f"~{fmt_tokens(estimate_tokens(md))} tokens est., {time.monotonic() - started:.1f}s)")
         else:
             try:
                 out_path = output_path(args.output, output_dir, name)
@@ -1181,7 +1204,8 @@ def main(argv: Optional[list] = None) -> int:
             except OSError as ex:
                 raise GitskimError(f"cannot write output: {ex}") from None
             ok = sum(1 for e in entries if e.status == "ok")
-            warn(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est.)")
+            info(f"wrote {out_path} ({ok} files, ~{fmt_tokens(estimate_tokens(md))} tokens est., "
+                 f"{time.monotonic() - started:.1f}s)")
         return 0
     except GitskimError as ex:
         warn(str(ex))
