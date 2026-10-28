@@ -115,6 +115,28 @@ def resolve_source(arg: str) -> tuple:
     return top_path, None, top_path.name
 
 
+def find_repos(root: Path, max_depth: int = 3) -> list:
+    """Git repositories below root (not root itself), up to max_depth levels deep.
+
+    Does not descend into a found repo, hidden directories or IGNORE_DIRS.
+    Returns sorted root-relative posix paths, e.g. ["api", "team/web"].
+    """
+    found = []
+    root = root.resolve()
+    for dirpath, dirnames, _ in os.walk(root):
+        d = Path(dirpath)
+        depth = len(d.relative_to(root).parts)
+        if depth and (d / ".git").exists():      # .git is a file in worktrees/submodules
+            found.append(d.relative_to(root).as_posix())
+            dirnames[:] = []
+            continue
+        if depth >= max_depth:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [n for n in dirnames if not n.startswith(".") and n not in IGNORE_DIRS]
+    return sorted(found)
+
+
 def cleanup(tmp: Optional[Path]) -> None:
     if tmp is not None:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -159,6 +181,10 @@ def matches_any(rel: str, patterns: list, casefold: bool = False) -> bool:
     return any(fnmatch.fnmatchcase(rel, p) or fnmatch.fnmatchcase(name, p) for p in patterns)
 
 
+def _user_match(rel: str, prefix: str, patterns: list) -> bool:
+    return matches_any(rel, patterns) or bool(prefix and matches_any(prefix + rel, patterns))
+
+
 def in_ignored_dir(rel: str) -> bool:
     return bool(set(rel.split("/")[:-1]) & IGNORE_DIRS)
 
@@ -168,7 +194,7 @@ def is_binary(path: Path) -> bool:
         return b"\0" in f.read(8192)
 
 
-def collect_files(repo: Path, opts: Options) -> list:
+def collect_files(repo: Path, opts: Options, prefix: str = "") -> list:
     """List candidate files via git ls-files and apply the filter chain.
 
     Order: --exclude always wins. IGNORE_DIRS (node_modules, .venv, dist, ...)
@@ -177,6 +203,9 @@ def collect_files(repo: Path, opts: Options) -> list:
     DEFAULT_IGNORE file patterns (lockfiles, images, ...); otherwise those
     apply too. Filtered-out files are dropped. Too-large, binary and unreadable
     files are kept with a status so they still appear in the tree.
+
+    prefix (multi-repo mode, e.g. "api/") lets --include/--exclude also match
+    the workspace-relative path, so --exclude "legacy/*" drops a whole repo.
     """
     args = ["ls-files", "-z"]
     if opts.untracked:
@@ -184,12 +213,12 @@ def collect_files(repo: Path, opts: Options) -> list:
     out = run_git(repo, *args)
     entries = []
     for rel in sorted(set(filter(None, out.split("\0")))):   # set: unmerged entries repeat
-        if opts.exclude and matches_any(rel, opts.exclude):
+        if opts.exclude and _user_match(rel, prefix, opts.exclude):
             continue
         if opts.default_ignore and in_ignored_dir(rel):
             continue
         if opts.include:
-            if not matches_any(rel, opts.include):
+            if not _user_match(rel, prefix, opts.include):
                 continue
         elif opts.default_ignore and matches_any(rel, DEFAULT_IGNORE, casefold=True):
             continue
@@ -730,24 +759,39 @@ def _fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _plural(n: int, word: str) -> str:
-    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+def _plural(n: int, word: str, plural: str = "") -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {plural or word + 's'}"
+
+
+def _labelled(x) -> list:
+    """diff/log are a plain string (one repo) or [(repo_name, text), ...] (multi-repo)."""
+    if isinstance(x, str):
+        return [("", x)] if x else []
+    return [(label, text) for label, text in x if text]
 
 
 def render(name: str, branch: str, commit: str, entries: list, opts: Options,
-           diff: str = "", log: str = "") -> str:
+           diff="", log="", repos: Optional[list] = None) -> str:
+    """repos: [(name, branch, commit), ...] in multi-repo mode; branch/commit are then ignored."""
     included = [e for e in entries if e.status == "ok"]
     tree = render_tree(entries)
     total = sum(e.tokens for e in included) + estimate_tokens(tree)
     today = _dt.date.today().isoformat()
     mode = "full" if opts.full else "skim"
+    where = _plural(len(repos), "repository", "repositories") if repos else f"Branch {branch} @ {commit}"
     out = [
         f"# {name}",
-        f"Branch {branch} @ {commit} · {today} · {len(included)}/{len(entries)} files · "
+        f"{where} · {today} · {len(included)}/{len(entries)} files · "
         f"~{fmt_tokens(total)} tokens (est.) · mode: {mode}",
         "",
-        "## Structure", "```", tree, "```", "",
     ]
+    if repos:
+        out += ["## Repositories", "", "| Repository | Branch | Commit | Files | ~Tokens |", "|---|---|---|---:|---:|"]
+        for rname, rbranch, rcommit in repos:
+            mine = [e for e in included if e.path.startswith(rname + "/")]
+            out.append(f"| {rname} | {rbranch} | {rcommit} | {len(mine)} | {fmt_tokens(sum(e.tokens for e in mine))} |")
+        out.append("")
+    out += ["## Structure", "```", tree, "```", ""]
     if included:
         out += ["## Largest files", "", "| File | Commits | ~Tokens |", "|---|---:|---:|"]
         for e in sorted(included, key=lambda e: -e.tokens)[:10]:
@@ -767,13 +811,15 @@ def render(name: str, branch: str, commit: str, entries: list, opts: Options,
         f = _fence(e.content)
         out += [f"### {e.path} · {_plural(e.commits, 'commit')} · ~{fmt_tokens(e.tokens)} tokens",
                 f"{f}{e.lang}", e.content, f, ""]
-    if log or diff:
+    logs, diffs = _labelled(log), _labelled(diff)
+    if logs or diffs:
         out.append("## Recent changes")
         out.append("")
-        if log:
-            out += ["### git log", "```", log.rstrip("\n"), "```", ""]
-        if diff:
-            out += ["### git diff (working tree + staged)", "```diff", diff.rstrip("\n"), "```", ""]
+        for label, text in logs:
+            out += [f"### git log{' · ' + label if label else ''}", "```", text.rstrip("\n"), "```", ""]
+        for label, text in diffs:
+            out += [f"### git diff (working tree + staged){' · ' + label if label else ''}",
+                    "```diff", text.rstrip("\n"), "```", ""]
     return "\n".join(out).rstrip("\n") + "\n"
 
 
@@ -792,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gitskim",
         description="Skim a git repository into one compact Markdown file for LLM context.",
     )
-    p.add_argument("source", help="local path or git URL")
+    p.add_argument("source", help="local path or git URL; a folder that is not a repo is scanned for repos")
     p.add_argument("-o", "--output", default="SKIM.md", help="output file (default: SKIM.md)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
     p.add_argument("--full", action="store_true", help="full file contents instead of signatures")
@@ -805,6 +851,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diff", action="store_true", help="append working-tree and staged diff")
     p.add_argument("--log", type=int, default=0, metavar="N", help="append last N commits")
     p.add_argument("--no-secret-scan", action="store_true", help="disable secret heuristics")
+    p.add_argument("--multi", action="store_true", help="treat source as a folder of repos even if it is a repo itself")
+    p.add_argument("--scan-depth", type=non_negative_int, default=3, metavar="N",
+                   help="how deep to look for repos in multi-repo mode (default: 3)")
     p.add_argument("--version", action="version", version=f"gitskim {__version__}")
     return p
 
@@ -821,6 +870,49 @@ def repo_meta(repo: Path) -> tuple:
     return branch, commit
 
 
+def skim_repo(repo: Path, opts: Options, prefix: str = "") -> list:
+    """Collect, rank and process one repo. Entry paths get prefix prepended afterwards."""
+    entries = collect_files(repo, opts, prefix)
+    rank_files(repo, entries, opts.sort)
+    for e in entries:
+        try:
+            process_file(repo, e, opts)
+        except OSError as ex:
+            e.status, e.note = "error", str(ex)
+            warn(f"cannot read {prefix}{e.path}: {ex}")
+    for e in entries:
+        e.path = prefix + e.path
+    return entries
+
+
+def recent_changes(repo: Path, args) -> tuple:
+    diff = log = ""
+    try:                                  # both fail on a repo without commits
+        if args.diff:
+            diff = run_git(repo, "diff") + run_git(repo, "diff", "--cached")
+        if args.log:
+            log = run_git(repo, "log", f"-n{args.log}", "--oneline", "--no-decorate")
+    except GitskimError:
+        pass
+    return diff, log
+
+
+def multi_repo_root(source: str, force: bool) -> Optional[Path]:
+    """The folder to scan for repos, or None for normal single-repo mode."""
+    if URL_RE.match(source) or source.endswith(".git"):
+        return None
+    p = Path(source).expanduser()
+    if not p.is_dir():
+        return None                       # resolve_source reports it
+    if force:
+        return p
+    try:
+        run_git(p, "rev-parse", "--show-toplevel")
+        return None
+    except GitskimError:
+        return p
+
+
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
     opts = Options(
@@ -830,30 +922,45 @@ def main(argv: Optional[list] = None) -> int:
     )
     tmp = None
     try:
-        repo, tmp, name = resolve_source(args.source)
-        entries = collect_files(repo, opts)
-        rank_files(repo, entries, opts.sort)
-        for e in entries:
-            try:
-                process_file(repo, e, opts)
-            except OSError as ex:
-                e.status, e.note = "error", str(ex)
-                warn(f"cannot read {e.path}: {ex}")
+        if shutil.which("git") is None:
+            raise GitskimError("git not found on PATH")
+        root = multi_repo_root(args.source, args.multi)
+        if root is not None:
+            found = find_repos(root, args.scan_depth)
+            if not found:
+                what = "no git repositories found below" if args.multi else "not a git repository and no git repositories found below it:"
+                raise GitskimError(f"{what} {args.source}")
+            name, entries, repos, diffs, logs = root.resolve().name, [], [], [], []
+            for rel in found:
+                repo = root / rel
+                mine = skim_repo(repo, opts, prefix=rel + "/")
+                if not mine:                  # e.g. --exclude "legacy/*": leave the repo out entirely
+                    continue
+                entries += mine
+                repos.append((rel, *repo_meta(repo)))
+                diff, log = recent_changes(repo, args)
+                diffs.append((rel, diff))
+                logs.append((rel, log))
+            if opts.sort == "changes":
+                entries.sort(key=lambda e: (-e.commits, e.path))
+            else:
+                entries.sort(key=lambda e: e.path)
+            if not repos:
+                raise GitskimError("all repositories were filtered out")
+            warn(f"skimmed {_plural(len(repos), 'repository', 'repositories')}: {', '.join(r[0] for r in repos)}")
+            branch = commit = "-"
+        else:
+            repo, tmp, name = resolve_source(args.source)
+            entries = skim_repo(repo, opts)
+            branch, commit = repo_meta(repo)
+            diffs, logs = recent_changes(repo, args)
+            repos = None
         for e in entries:
             if e.status == "secret":
                 warn(f"skipped {e.path}: possible secret ({e.note})")
             elif e.status == "ok" and e.tokens > LARGE_FILE_TOKENS:
                 warn(f"{e.path} is large (~{fmt_tokens(e.tokens)} tokens est.)")
-        branch, commit = repo_meta(repo)
-        diff = log = ""
-        try:                                  # both fail on a repo without commits
-            if args.diff:
-                diff = run_git(repo, "diff") + run_git(repo, "diff", "--cached")
-            if args.log:
-                log = run_git(repo, "log", f"-n{args.log}", "--oneline", "--no-decorate")
-        except GitskimError:
-            pass
-        md = render(name, branch, commit, entries, opts, diff=diff, log=log)
+        md = render(name, branch, commit, entries, opts, diff=diffs, log=logs, repos=repos)
         if args.stdout:
             try:
                 sys.stdout.write(md)
