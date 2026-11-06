@@ -1057,5 +1057,202 @@ class TestDiffAndLog(unittest.TestCase):
         self.assertNotIn("## Recent changes", res.stdout)
 
 
+def make_anonymizer(case, terms=(), domains=(), keep=()):
+    d = Path(tempfile.mkdtemp(prefix="gitskim-anon-"))
+    case.addCleanup(shutil.rmtree, d, ignore_errors=True)
+    amap = gitskim.AnonMap(d / "map.json")
+    anon = gitskim.Anonymizer(amap, list(keep))
+    anon.add_config(gitskim.AnonConfig(present=True, terms=list(terms), domains=list(domains)))
+    return anon, amap
+
+
+class TestAnonymizer(unittest.TestCase):
+    def test_case_and_boundaries(self):
+        anon, _ = make_anonymizer(self, terms=[("Acme", "company")])
+        out = anon.apply("Acme ACME acme AcmeBilling myAcme com.acme.api acme_core acme2 Acmeist")
+        self.assertEqual(out, "Company1 COMPANY1 company1 Company1Billing myCompany1 "
+                              "com.company1.api company1_core acme2 Acmeist")
+
+    def test_longest_term_and_kinds(self):
+        anon, _ = make_anonymizer(self, terms=[("Müller", "person"), ("Müller GmbH", "customer")])
+        self.assertEqual(anon.apply("Müller GmbH, Herr Müller"), "Customer1, Herr Person1")
+
+    def test_person_name_parts_share_pseudonym(self):
+        anon, _ = make_anonymizer(self, terms=[("Erika Musterfrau", "person")])
+        self.assertEqual(anon.apply("Erika Musterfrau / Musterfrau / Erika"), "Person1 / Person1 / Person1")
+
+    def test_domains_emails_ips(self):
+        anon, _ = make_anonymizer(self, domains=["acme.internal"])
+        out = anon.apply("https://api.acme.internal/x bob@acme.com 10.1.2.3 "
+                         "127.0.0.1 lodash@4.17.21 git@github.com dev@example.com 1.2.3.400 v1.2.3.4")
+        self.assertEqual(out, "https://api.domain1.example/x user1@example.com 10.0.0.2 "
+                              "127.0.0.1 lodash@4.17.21 git@github.com dev@example.com 1.2.3.400 v1.2.3.4")
+
+    def test_keep_and_short_terms(self):
+        anon, _ = make_anonymizer(self, terms=[("Spring", "company"), ("AB", "company")], keep=["spring"])
+        self.assertEqual(anon.apply("Spring AB"), "Spring AB")
+
+    def test_mapping_is_stable_and_private(self):
+        anon, amap = make_anonymizer(self, terms=[("Acme", "company"), ("Globex", "company")])
+        anon.apply("Acme Globex")
+        amap.save()
+        self.assertEqual(amap.path.stat().st_mode & 0o777, 0o600)
+        anon2, _ = make_anonymizer(self)
+        anon2.map = gitskim.AnonMap(amap.path)
+        anon2.add_term("Initech", "company")
+        anon2.add_term("Globex", "company")
+        self.assertEqual(anon2.apply("Initech Globex"), "Company3 Company2")
+
+    def test_deanonymize_roundtrip(self):
+        anon, amap = make_anonymizer(self, terms=[("Acme", "company"), ("Erika Musterfrau", "person")])
+        for i in range(2, 11):
+            amap.get(f"Other{i}", "company")
+        text = "AcmeBilling in com.acme.x, ask Erika Musterfrau at erika@acme.com"
+        out = anon.apply(text)
+        self.assertNotIn("cme", out)
+        self.assertEqual(gitskim.deanonymize(out, amap), text)
+        self.assertEqual(gitskim.deanonymize("Company10 Company1s person9@example.com", amap),
+                         "Other10 Company1s person9@example.com")
+
+    def test_leaks_and_summary(self):
+        anon, _ = make_anonymizer(self, terms=[("Acme", "company")])
+        out = anon.apply("Acme\nAcmeist\nbob@x.org")
+        self.assertEqual(anon.leaks(out), [("Acme", 1, 2)])
+        self.assertEqual(anon.summary(), "1 company, 1 email")
+
+    def test_remote_parts(self):
+        self.assertEqual(gitskim._remote_parts("git@git.acme.internal:acme/billing.git"),
+                         ("git.acme.internal", "acme", "billing"))
+        self.assertEqual(gitskim._remote_parts("https://user:tok@github.com/acme/api/"),
+                         ("github.com", "acme", "api"))
+        self.assertEqual(gitskim._base_domain("git.acme.co.uk"), "acme.co.uk")
+
+
+class TestAnonymizeCli(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo({
+            "src/com/acme/Billing.java": "package com.acme;\n// ask Erika Musterfrau, db 10.20.30.40\n"
+                                         "class AcmeBilling {}\n",
+            "README.md": "# Acme portal\nContact: Max Mustermann <max@acme.com>\n",
+        }, case=self)
+        git(self.repo, "-c", "user.name=Max Mustermann", "-c", "user.email=max@acme.com",
+            "commit", "-q", "--allow-empty", "-m", "by max")
+        git(self.repo, "remote", "add", "origin", "git@git.acme.internal:acme/billing-portal.git")
+        self.dir = Path(tempfile.mkdtemp(prefix="gitskim-anoncfg-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.cfg = self.dir / "config.ini"
+
+    def run_cli(self, *args, input=None):
+        return subprocess.run([sys.executable, str(ROOT / "gitskim.py"), "--config", str(self.cfg), *args],
+                              capture_output=True, text=True, input=input, cwd=self.dir)
+
+    def configure(self, extra="terms =\n    Acme\n    Erika Musterfrau = person\n"):
+        self.cfg.write_text("[gitskim]\n\n[anonymize]\n" + extra, encoding="utf-8")
+
+    def test_missing_config_is_created_and_stops(self):
+        res = self.run_cli("--anonymize", str(self.repo), "--stdout")
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(res.stdout, "")
+        self.assertIn("--anon-prompt", res.stderr)
+        text = self.cfg.read_text(encoding="utf-8")
+        self.assertIn("[anonymize]", text)
+        self.assertIn("#   You get a Markdown summary", text)
+        cfg = gitskim.load_config(str(self.cfg))
+        self.assertTrue(cfg.anon.present)
+        self.assertEqual(cfg.anon.terms, [])
+        res = self.run_cli("--anonymize", str(self.repo), "--stdout")   # still empty -> stops again
+        self.assertEqual(res.returncode, 2)
+
+    def test_section_is_appended_to_existing_config(self):
+        self.cfg.write_text("[gitskim]\nmax_size = 50\n", encoding="utf-8")
+        res = self.run_cli("--anonymize", str(self.repo), "--stdout")
+        self.assertEqual(res.returncode, 2)
+        text = self.cfg.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("[gitskim]\nmax_size = 50\n"))
+        self.assertEqual(gitskim.load_config(str(self.cfg)).max_size, 50)
+
+    def test_init_config_template_has_anonymize_section(self):
+        res = self.run_cli("--init-config")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cfg = gitskim.load_config(str(self.cfg))
+        self.assertTrue(cfg.anon.present)
+        self.assertFalse(cfg.anon.enabled)
+
+    def test_term_kinds_and_invalid_kind(self):
+        self.configure("terms = Acme, Falke = project\ndomains = .acme.com.\n")
+        cfg = gitskim.load_config(str(self.cfg))
+        self.assertEqual(cfg.anon.terms, [("Acme", "company"), ("Falke", "project")])
+        self.assertEqual(cfg.anon.domains, ["acme.com"])
+        self.configure("terms = Acme = big company\n")
+        with self.assertRaises(gitskim.GitskimError):
+            gitskim.load_config(str(self.cfg))
+
+    def test_anonymize_end_to_end(self):
+        self.configure()
+        res = self.run_cli("--anonymize", str(self.repo), "--full", "--stdout")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        md = res.stdout
+        self.assertIn("mode: full · anonymized", md)
+        self.assertIn("package com.company1;", md)
+        self.assertIn("class Company1Billing", md)
+        self.assertIn("ask Person", md)
+        self.assertIn("Contact: Person", md)
+        self.assertIn("@example.com>", md)
+        for original in ("Acme", "acme", "Erika", "Mustermann", "10.20.30.40"):
+            self.assertNotIn(original, md)
+        self.assertIn("anonymized:", res.stderr)
+        amap = gitskim.AnonMap(self.dir / "anon-map.json")
+        self.assertEqual(amap.by_orig["acme"]["pseudonym"], "Company1")
+        self.assertIn("acme.internal", amap.by_orig)
+        self.assertIn("billing-portal", amap.by_orig)
+        back = self.run_cli("--deanonymize", input="Rename Company1Billing, says Person1.\n")
+        self.assertEqual(back.returncode, 0, back.stderr)
+        self.assertEqual(back.stdout, "Rename AcmeBilling, says Erika Musterfrau.\n")
+
+    def test_output_name_is_anonymized(self):
+        self.configure()
+        named = self.dir / "billing-portal"
+        shutil.copytree(self.repo, named)
+        res = self.run_cli("--anonymize", str(named), "--output-dir", str(self.dir / "out"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        [f] = (self.dir / "out").iterdir()
+        self.assertTrue(f.name.startswith("project1_"), f.name)      # case follows the original
+        self.assertTrue(f.read_text(encoding="utf-8").startswith("# project1\n"))
+
+    def test_config_enabled_and_no_anonymize(self):
+        self.configure("enabled = true\nterms = Acme\n")
+        self.assertIn("Company1", self.run_cli(str(self.repo), "--stdout").stdout)
+        self.assertIn("Acme", self.run_cli(str(self.repo), "--stdout", "--no-anonymize").stdout)
+
+    def test_confirmed_runs_with_auto_detection_only(self):
+        self.configure("confirmed = true\n")
+        res = self.run_cli("--anonymize", str(self.repo), "--full", "--stdout")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Mustermann", res.stdout)        # git author
+        self.assertIn("class Org1Billing", res.stdout)    # remote owner 'acme'
+        self.assertIn("Erika Musterfrau", res.stdout)     # never configured, not detectable
+
+    def test_anon_prompt_bundle(self):
+        self.configure("terms = Globex\n")
+        res = self.run_cli("--anon-prompt", str(self.repo), "--full", "--stdout")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        md = res.stdout
+        self.assertIn("internal LLM only", md)
+        self.assertIn("You get a Markdown summary", md)
+        self.assertIn("Max Mustermann <max@acme.com>", md)
+        self.assertIn("Domains (from git remotes): acme.internal", md)
+        self.assertIn("    Globex", md)
+        self.assertIn("ask Erika Musterfrau", md)          # the skim itself is NOT anonymized
+        self.assertIn("internal LLM only", res.stderr)
+        self.assertFalse((self.dir / "anon-map.json").exists())
+        self.assertNotEqual(self.run_cli("--anon-prompt", "--anonymize", str(self.repo)).returncode, 0)
+
+    def test_deanonymize_without_map(self):
+        self.configure()
+        res = self.run_cli("--deanonymize", input="x")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("no pseudonym mapping", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
