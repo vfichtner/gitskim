@@ -7,6 +7,7 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 - **Git does the heavy lifting.** `git ls-files` gives the file set with correct `.gitignore` semantics. `git log` ranks files by how often they change, so the important ones come first.
 - **Database schema section** from Liquibase changelogs (XML, formatted SQL, YAML) and SQL migrations.
 - **Secret heuristics** on by default: files that look like they contain keys, tokens or passwords are skipped and flagged.
+- **Anonymization** for sending company code to an external LLM: company, customer, people, host and project names become stable pseudonyms (`Acme` → `Company1`), and LLM answers can be translated back.
 
 ## Usage
 
@@ -34,6 +35,11 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `--diff` | off | append `git diff` + staged diff |
 | `--log N` | `0` | append last N commits |
 | `--no-secret-scan` | | disable secret heuristics |
+| `--anonymize` | off (or config) | replace names with stable pseudonyms, see [Anonymization](#anonymization) |
+| `--no-anonymize` | | turn it off when the config enables it |
+| `--anon-prompt` | | write an LLM prompt plus the NOT anonymized skim, to build the config with an internal LLM |
+| `--deanonymize [FILE]` | stdin | translate pseudonyms back to the originals, print to stdout |
+| `--anon-map FILE` | `anon-map.json` next to the config | pseudonym mapping |
 | `--multi` | | scan the folder for repos even if it is a repo itself |
 | `--scan-depth N` | `3` (or config) | how deep to look for repos in multi-repo mode and the workspace |
 | `--config FILE` | `$GITSKIM_CONFIG` or `~/.config/gitskim/config.ini` | config file |
@@ -98,6 +104,45 @@ Two heuristics, both on by default and disabled together by `--no-secret-scan`:
 
 Skipped files are listed in the tree with a warning marker and reported on stderr.
 
+## Anonymization
+
+For handing company code to an external LLM without naming the company, its customers, colleagues or internal hosts. Names are replaced consistently and by type, so the LLM still understands the code:
+
+    package com.acme.billing;                        package com.company1.billing;
+    // For Müller GmbH, ask Max Mustermann     →     // For Customer1, ask Person1
+    class AcmeInvoice                                class Company1Invoice
+    URL = "https://api.acme.internal"                URL = "https://api.domain1.example"
+
+**First-time setup**, done once with an *internal* LLM, which knows which names matter:
+
+1. `gitskim --anonymize api` finds no `[anonymize]` section, creates the config (or appends the section to an existing one), explains the next steps and exits with code 2 without writing anything. The section's comments contain the prompt.
+2. `gitskim --anon-prompt api` writes `api_anon-prompt_<timestamp>.md`: the prompt, what gitskim already detects on its own, the current terms, and a normal, **not anonymized** skim.
+3. Give that file to an internal LLM. It returns an `[anonymize]` block and a check list (term, kind, reason, location). It does not rewrite the skim; gitskim does that, so the output stays complete and matches the mapping.
+4. Paste the block into the config. From then on `gitskim --anonymize api` (or `enabled = true`) writes the anonymized skim.
+
+```ini
+[anonymize]
+enabled = true
+terms =                 # "Name" or "Name = kind" (company, customer, person, project, ...; default company)
+    Acme
+    Müller GmbH = customer
+    Erika Musterfrau = person
+domains =               # hosts below them are replaced too
+    acme.internal
+keep =                  # never replaced
+    Spring
+```
+
+**Detected automatically:** git authors (full name, name parts of 4+ letters and the e-mail login get the same `PersonN`), every e-mail address and IPv4 address in the text, internal git remote domains, remote owners and repo/folder names. Common words (`api`, `web`, `core`, `test`, …), loopback and documentation addresses, `example.com` and public git hosts are left alone. Terms shorter than 3 characters are ignored.
+
+**Matching** is case-insensitive and keeps the case (`ACME` → `COMPANY1`, `acme` → `company1`), at word, camelCase and separator boundaries (`AcmeBilling`, `com.acme.api`, `acme_core`), but not inside a word (`Acmeist`) or before a digit (`acme2`). It runs over the whole rendered file, including tree, paths, `--log` and `--diff`; the default output file name uses the pseudonym too. The header says `mode: skim · anonymized`.
+
+**Mapping:** `anon-map.json` next to the config (mode `0600`) is reused across runs and repos, so `Acme` stays `Company1`. It contains the originals: keep it out of any repository. `gitskim --deanonymize answer.md` (or `pbpaste | gitskim --deanonymize`) translates an LLM answer back.
+
+**Leak check:** afterwards gitskim reports every original that still appears in any spelling, e.g. `'Acme' still appears 1x (first in line 37)`, and a summary such as `anonymized: 2 persons, 1 company, 1 domain`.
+
+With `confirmed = true` and no terms, only the automatic detection runs. Names that are neither git authors nor in `terms` are not found, and code structure or comments can still give the company away: review the output before sharing it.
+
 ## Output
 
     # repo-name
@@ -129,6 +174,7 @@ If you need exact token counts, many languages with precise parsing, or an MCP s
 - Token counts are `len(text) / 4`, labelled as estimates.
 - Non-Python skimming is regex-based and will miss or over-include lines in unusual code styles.
 - Secret detection is a handful of patterns, not a security tool. Review output before sharing.
+- Anonymization only knows git authors, the configured terms and e-mail/IPv4 shapes; it is a help, not a guarantee. IPv6 addresses are not replaced.
 - Remote clones are shallow (`--depth 1`), so change-frequency ranking degrades to path order for them.
 - Change-frequency ranking does not follow renames; a renamed file starts counting from zero.
 - Change-frequency ranking looks at the last 500 commits only.

@@ -1,6 +1,6 @@
 # gitskim – Anonymisierung (Design)
 
-*Datum: 2026-11-05 · Status: Design aus Brainstorming, nicht implementiert*
+*Datum: 2026-11-05 · Status: implementiert (19 Tests), Abweichungen unten unter „Umsetzung“*
 
 ## Ziel
 
@@ -218,3 +218,28 @@ Schreibweisen-Varianten (`company1`, `COMPANY1`) werden mit uebersetzt.
   frei waehlbare Kategorien?
 - Dateinamen und Pfade mit Begriffen werden ersetzt; reicht das, oder braucht
   es eine Option, Pfade zu erhalten?
+
+## Umsetzung (Abweichungen zum Design)
+
+- **Prompt und Ausgaben auf Englisch**, wie der Rest von gitskim. Steht einmal
+  als `ANON_PROMPT` im Code; Config-Kommentar und Bundle werden daraus erzeugt.
+- **Kategorien frei waehlbar** (offener Punkt 1): `Name = kind` mit einem Wort
+  a-z, Pseudonym `Kind1`. Default `company`.
+- **Pfade werden immer ersetzt** (offener Punkt 2), keine Option.
+- **Domains:** `acme.internal` → `domain1.example`, Subdomains bleiben
+  (`api.acme.internal` → `api.domain1.example`) statt `host1.example.internal`.
+  Interne Remote-Hosts gehen als Basisdomain ein (`git.acme.internal` → `acme.internal`).
+- **Neu erkannt:** Remote-Owner (`acme` in `git@host:acme/x.git`) als `OrgN`,
+  E-Mail-Login der Autoren und Namensteile von `person`-Terms aus der Config
+  (teilen das Pseudonym der Person).
+- **Generische Woerter** (`api`, `web`, `core`, `test`, …) und Teile unter
+  4 Zeichen werden bei automatisch erkannten Namen uebersprungen, sonst zerlegt
+  ein Repo namens `api` den Code.
+- **Keine Ersetzung vor einer Ziffer** (`acme2`): waere als `company12`
+  mehrdeutig; die Leak-Pruefung meldet die Stelle.
+- **IPv6** nicht umgesetzt (zu viele Fehltreffer mit `::` in C++/Rust).
+- **Ersteinrichtung:** fehlt die Config, wird eine minimale Datei
+  (`[gitskim]` leer + `[anonymize]`) angelegt, nicht das volle Template, damit
+  kein Beispiel-`workspace = ~/code` aktiv wird. `--init-config` enthaelt den
+  Abschnitt ebenfalls.
+- Exit 2 auch bei vorhandenem, aber leerem Abschnitt (ohne `confirmed = true`).

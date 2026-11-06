@@ -10,6 +10,7 @@ import ast
 import configparser
 import datetime as _dt
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -44,6 +45,7 @@ class Options:
     sort: str = "changes"
     secret_scan: bool = True
     ignore_dirs: list = field(default_factory=list)   # extra directory names, from the config file
+    anonymized: bool = False                          # only labels the header; the text is replaced after render()
 
 
 @dataclass
@@ -792,7 +794,7 @@ def render(name: str, branch: str, commit: str, entries: list, opts: Options,
     tree = render_tree(entries)
     total = sum(e.tokens for e in included) + estimate_tokens(tree)
     today = _dt.date.today().isoformat()
-    mode = "full" if opts.full else "skim"
+    mode = ("full" if opts.full else "skim") + (" · anonymized" if opts.anonymized else "")
     where = _plural(len(repos), "repository", "repositories") if repos else f"Branch {branch} @ {commit}"
     out = [
         f"# {name}",
@@ -838,6 +840,491 @@ def render(name: str, branch: str, commit: str, entries: list, opts: Options,
     return "\n".join(out).rstrip("\n") + "\n"
 
 
+# ── Anonymization ─────────────────────────────────────────────────────────────
+#
+# Replaces company, customer, people, host and project names with stable, typed
+# pseudonyms (Acme -> Company1) over the rendered Markdown. The mapping is kept in
+# a local JSON file so the same name always gets the same pseudonym and an LLM
+# answer can be translated back with --deanonymize.
+
+ANON_PROMPT = """\
+You get a Markdown summary of a code repository. It will later be sent to an
+external LLM. Find everything that identifies the company, its customers or
+partners, people, internal infrastructure or internal projects: company and
+customer names (also inside package names such as com.acme.*), product and
+code names, names of people (also in comments, @author tags, TODOs), internal
+domains and host names. Ignore open-source libraries, frameworks, programming
+languages and general technical or business terms. The section "Already
+covered" lists what gitskim replaces on its own; do not repeat it.
+
+Answer with exactly two parts:
+
+1. An INI block that starts with [anonymize] and has these keys:
+   terms   = one entry per line, indented, as "Name" or "Name = kind";
+             kind is one word such as company, customer, person, project,
+             product (default: company). Use the spelling found in the text;
+             gitskim also matches other cases and CamelCase/package forms.
+   domains = internal domains, one per line (e.g. acme.internal); hosts below
+             them are replaced as well.
+   keep    = words gitskim must not replace even though they look like names.
+   enabled = true
+2. A Markdown table: Term | Kind | Reason | Example location. Mark uncertain
+   cases with "?".
+
+Only list what actually appears in the text. Do not write an anonymized version
+of the document."""
+
+ANON_KEYS = {"enabled", "confirmed", "terms", "domains", "keep", "map"}
+
+
+def _commented(text: str, prefix: str = "#   ") -> str:
+    return "\n".join((prefix + line).rstrip() for line in text.splitlines())
+
+
+ANON_SECTION = f"""\
+[anonymize]
+# Replaces company, customer, people, host and project names with stable
+# pseudonyms (Acme -> Company1) when you run `gitskim --anonymize`.
+# Git authors, their e-mails, the repo/remote names, all e-mail addresses
+# and IPv4 addresses are detected automatically; everything else goes below.
+#
+# First-time setup:
+#   1. gitskim --anon-prompt <project>   writes the prompt below plus a normal
+#      (NOT anonymized) skim into one file.
+#   2. Give that file to an INTERNAL LLM only, never to an external one.
+#   3. Paste the [anonymize] block it returns over this section and read its
+#      check list.
+#
+# The prompt (also contained in the --anon-prompt file):
+#
+{_commented(ANON_PROMPT)}
+
+# enabled = true: anonymize every run (turn off once with --no-anonymize).
+enabled = false
+
+# One per line, "Name" or "Name = kind" (kind: company, customer, person,
+# project, product, ...; default company).
+terms =
+
+# Internal domains; hosts below them are replaced too (api.acme.internal).
+domains =
+
+# Words that must never be replaced.
+keep =
+
+# confirmed = true   # run with automatic detection only, even if terms is empty
+# map = ~/.config/gitskim/anon-map.json   # pseudonym mapping (contains originals!)
+"""
+
+ANON_BOOTSTRAP = f"""\
+# gitskim configuration, created by `gitskim --anonymize`.
+# `gitskim --init-config --config OTHER_FILE` shows all [gitskim] options.
+
+[gitskim]
+
+{ANON_SECTION}"""
+
+
+@dataclass
+class AnonConfig:
+    present: bool = False              # the config file has an [anonymize] section
+    enabled: bool = False
+    confirmed: bool = False
+    terms: list = field(default_factory=list)      # [(term, kind), ...]
+    domains: list = field(default_factory=list)
+    keep: list = field(default_factory=list)
+    map: Optional[str] = None
+
+
+def _config_bool(value: str, key: str, p: Path) -> bool:
+    v = value.strip().lower()
+    if v in ("1", "yes", "true", "on"):
+        return True
+    if v in ("", "0", "no", "false", "off"):
+        return False
+    raise GitskimError(f"invalid config {p}: {key} must be true or false")
+
+
+def parse_anon_section(sec, p: Path) -> AnonConfig:
+    for key in sec:
+        if key not in ANON_KEYS:
+            warn(f"{p}: unknown key '{key}' in [anonymize] ignored")
+    ac = AnonConfig(present=True)
+    ac.enabled = _config_bool(sec.get("enabled", ""), "enabled", p)
+    ac.confirmed = _config_bool(sec.get("confirmed", ""), "confirmed", p)
+    for item in _config_list(sec.get("terms", "")):
+        term, _, kind = item.partition("=")
+        term, kind = term.strip(), (kind.strip().lower() or "company")
+        if not re.fullmatch(r"[a-z]+", kind):
+            raise GitskimError(f"invalid config {p}: kind of '{term}' must be one word (a-z), got '{kind}'")
+        if term:
+            ac.terms.append((term, kind))
+    ac.domains = [d.strip().strip(".").lower() for d in _config_list(sec.get("domains", "")) if d.strip(". ")]
+    ac.keep = _config_list(sec.get("keep", ""))
+    ac.map = sec.get("map", "").strip() or None
+    return ac
+
+
+def ensure_anon_section(p: Path) -> str:
+    """Create the config with an [anonymize] section, or append the section. Returns 'created' or 'appended'."""
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ANON_BOOTSTRAP, encoding="utf-8")
+        return "created"
+    old = p.read_text(encoding="utf-8")
+    with p.open("a", encoding="utf-8") as f:
+        f.write(("" if old.endswith("\n") else "\n") + "\n" + ANON_SECTION)
+    return "appended"
+
+
+# Auto-detected names (repo names, author name parts, remote owners) are skipped
+# when they are this short or a common word, or the replacement would wreck the code.
+GENERIC_WORDS = set("""
+admin api app apps backend base bot build cli client cloud code common config core
+data demo deploy dev docs example frontend gateway infra internal lib libs main
+master mobile monorepo platform playground project root scripts sdk server service
+services shared site src test tests tool tools user utils web website worker
+""".split())
+PUBLIC_GIT_HOSTS = {"github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "dev.azure.com",
+                    "ssh.dev.azure.com", "sr.ht", "git.sr.ht", "gitee.com"}
+BOT_NAME_RE = re.compile(r"\[bot\]$|^(github|dependabot|renovate|snyk-bot|gitlab)\b", re.I)
+
+EMAIL_RE = re.compile(r"(?<![\w.%+-])([A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})(?![\w-])")
+IPV4_RE = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)")
+EXEMPT_EMAIL_LOCAL = {"git", "noreply", "no-reply"}
+MIN_TERM_LEN = 3
+
+
+def _exempt_domain(domain: str) -> bool:
+    d = domain.lower()
+    return (d in ("localhost", "example.com", "example.org", "example.net")
+            or d.endswith((".example", ".test", ".invalid", ".localhost", ".example.com")))
+
+
+def _exempt_ip(octets: tuple) -> bool:
+    a, b, c, d = octets
+    return (a == 127 or octets in ((0, 0, 0, 0), (255, 255, 255, 255))
+            or (a, b, c) in ((192, 0, 2), (198, 51, 100), (203, 0, 113)))
+
+
+def _auto_ok(word: str) -> bool:
+    return len(word) >= 4 and word.lower() not in GENERIC_WORDS and not word.isdigit()
+
+
+def _match_case(src: str, repl: str) -> str:
+    if src.isupper() and sum(c.isalpha() for c in src) > 1:
+        return repl.upper()
+    if src.islower():
+        return repl.lower()
+    return repl
+
+
+def _bounded(text: str, s: int, e: int) -> bool:
+    """Match at text[s:e] starts and ends at a word, camelCase or separator boundary.
+
+    A digit right after the match is no boundary: acme2 -> company12 would be ambiguous
+    (and Company1 must not match inside Company10); the leak check reports such spots.
+    """
+    if s > 0:
+        p, c = text[s - 1], text[s]
+        if p.isalnum() and not (c.isupper() and (p.islower() or p.isdigit())):
+            return False
+    if e < len(text):
+        n, last = text[e], text[e - 1]
+        if n.isdigit():
+            return False
+        if n.isalnum() and not (n.isupper() and not last.isupper()):
+            return False
+    return True
+
+
+def default_map_path(cfg_path: Optional[Path]) -> Path:
+    return (cfg_path or default_config_path()).parent / "anon-map.json"
+
+
+class AnonMap:
+    """Stable original <-> pseudonym mapping, persisted as JSON (mode 0600)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.entries = []                    # [{"original", "kind", "pseudonym"}]
+        self.by_orig, self.by_pseudo, self.changed = {}, {}, False
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                for ent in data.get("entries", []):
+                    self._index(ent)
+            except (ValueError, OSError, AttributeError, KeyError, TypeError) as ex:
+                raise GitskimError(f"cannot read mapping {path}: {ex}") from None
+
+    def _index(self, ent: dict) -> None:
+        self.entries.append(ent)
+        self.by_orig.setdefault(ent["original"].lower(), ent)
+        self.by_pseudo.setdefault(ent["pseudonym"].lower(), ent)
+
+    def _new_pseudonym(self, kind: str) -> str:
+        n = 1                     # first free number; name parts share their person's pseudonym
+        while True:
+            if kind == "domain":
+                p = f"domain{n}.example"
+            elif kind == "email":
+                p = f"user{n}@example.com"
+            elif kind == "ip":
+                p = f"10.0.{n // 250}.{n % 250 + 1}"
+            else:
+                p = f"{kind.capitalize()}{n}"
+            if p.lower() not in self.by_pseudo:
+                return p
+            n += 1
+
+    def get(self, original: str, kind: str, pseudonym: Optional[str] = None) -> dict:
+        ent = self.by_orig.get(original.lower())
+        if ent is None:
+            ent = {"original": original, "kind": kind, "pseudonym": pseudonym or self._new_pseudonym(kind)}
+            self._index(ent)
+            self.changed = True
+        return ent
+
+    def save(self) -> None:
+        if not self.changed:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "entries": self.entries}, f, ensure_ascii=False, indent=1)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+        self.changed = False
+
+
+def _remote_parts(url: str) -> tuple:
+    """(host, owner, repo) of a git remote URL; empty strings where unknown."""
+    m = re.match(r"^(?:[a-z+]+://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?/?$", url.strip())
+    if not m:
+        return "", "", ""
+    host, path = m.group(1).lower(), m.group(2).strip("/").split("/")
+    return host, (path[0] if len(path) > 1 else ""), path[-1]
+
+
+def _base_domain(host: str) -> str:
+    labels = host.split(".")
+    if len(labels) >= 3 and len(labels[-1]) == 2 and len(labels[-2]) <= 3:   # acme.co.uk
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:]) if len(labels) >= 2 else host
+
+
+@dataclass
+class AutoTerms:
+    persons: dict = field(default_factory=dict)    # name -> [emails]
+    emails: list = field(default_factory=list)     # author e-mails without a usable name
+    domains: list = field(default_factory=list)
+    orgs: list = field(default_factory=list)
+    projects: list = field(default_factory=list)
+
+    def add(self, attr: str, value: str) -> None:
+        lst = getattr(self, attr)
+        if value and value.lower() not in (x.lower() for x in lst):
+            lst.append(value)
+
+
+def collect_auto_terms(repos: list) -> AutoTerms:
+    """repos: [(path, label), ...]. Git authors, remotes and repo/folder names."""
+    auto = AutoTerms()
+    for repo, label in repos:
+        for part in re.split(r"[/+]", label) + [repo.name]:
+            if _auto_ok(part):
+                auto.add("projects", part)
+        try:
+            log = run_git(repo, "log", "-n2000", "--format=%an%x00%ae%x00%cn%x00%ce")
+        except GitskimError:
+            log = ""
+        for line in log.splitlines():
+            f = line.split("\0")
+            for name, email in ((f[0], f[1]), (f[2], f[3])) if len(f) == 4 else ():
+                name, email = name.strip(), email.strip().lower()
+                if BOT_NAME_RE.search(name) or (email and _exempt_domain(email.rpartition("@")[2])):
+                    continue
+                if any(_auto_ok(w) for w in name.split()):
+                    emails = auto.persons.setdefault(name, [])
+                    if email and email not in emails:
+                        emails.append(email)
+                elif email:
+                    auto.add("emails", email)
+        try:
+            remotes = run_git(repo, "config", "--get-regexp", r"^remote\..*\.url$")
+        except GitskimError:
+            remotes = ""
+        for line in remotes.splitlines():
+            host, owner, name = _remote_parts(line.partition(" ")[2])
+            if host and host not in PUBLIC_GIT_HOSTS and "." in host:
+                auto.add("domains", _base_domain(host))
+            if _auto_ok(owner):
+                auto.add("orgs", owner)
+            if _auto_ok(name):
+                auto.add("projects", name)
+    return auto
+
+
+class Anonymizer:
+    def __init__(self, amap: AnonMap, keep: list = ()):
+        self.map = amap
+        self.keep = {k.lower() for k in keep}
+        self.terms = {}                   # lower(original) -> entry, matched in text this run
+        self.used = {}                    # pseudonym -> kind, replaced this run
+        self._rx = None
+
+    def add_term(self, original: str, kind: str, pseudonym: Optional[str] = None) -> Optional[dict]:
+        original = original.strip()
+        if len(original) < MIN_TERM_LEN or original.lower() in self.keep:
+            return None
+        ent = self.map.get(original, kind, pseudonym)
+        self.terms[original.lower()] = ent
+        self._rx = None
+        return ent
+
+    def add_config(self, ac: AnonConfig) -> None:
+        for term, kind in ac.terms:
+            if len(term) < MIN_TERM_LEN:
+                warn(f"anonymize: term '{term}' ignored (shorter than {MIN_TERM_LEN} characters)")
+            ent = self.add_term(term, kind)
+            if ent and kind == "person":
+                self._name_parts(term, ent["pseudonym"])
+        for d in ac.domains:
+            self.add_term(d, "domain")
+
+    def add_auto(self, auto: AutoTerms) -> None:
+        for name, emails in auto.persons.items():
+            ent = self.add_term(name, "person")
+            if ent is None:
+                continue
+            p = ent["pseudonym"]
+            self._name_parts(name, p)
+            for email in emails:
+                self.map.get(email, "email", f"{p.lower()}@example.com")
+                local = email.partition("@")[0].rpartition("+")[2]     # 123+login@users.noreply.github.com
+                if _auto_ok(local) and local not in EXEMPT_EMAIL_LOCAL:
+                    self.add_term(local, "person", p)
+        for email in auto.emails:
+            self.map.get(email, "email")
+        for d in auto.domains:
+            self.add_term(d, "domain")
+        for o in auto.orgs:
+            self.add_term(o, "org")
+        for pr in auto.projects:
+            self.add_term(pr, "project")
+
+    def _name_parts(self, name: str, pseudonym: str) -> None:
+        """'Max Mustermann' -> 'Mustermann' alone gets the same pseudonym (parts shorter than 4 are skipped)."""
+        words = name.split()
+        if len(words) > 1:
+            for w in words:
+                if _auto_ok(w) and w.lower() not in self.terms:
+                    self.add_term(w, "person", pseudonym)
+
+    def _use(self, ent: dict) -> str:
+        self.used[ent["pseudonym"]] = ent["kind"]
+        return ent["pseudonym"]
+
+    def _email(self, m) -> str:
+        full, local, domain = m.group(0), m.group(1), m.group(2)
+        if (_exempt_domain(domain) or local.lower() in EXEMPT_EMAIL_LOCAL
+                or full.lower() in self.keep or full.lower() in self.map.by_pseudo):
+            return full
+        ent = self.map.get(full, "email")
+        self.terms.setdefault(full.lower(), ent)
+        return _match_case(full, self._use(ent))
+
+    def _ip(self, m) -> str:
+        octets = tuple(int(x) for x in m.groups())
+        if max(octets) > 255 or _exempt_ip(octets) or m.group(0) in self.map.by_pseudo or m.group(0) in self.keep:
+            return m.group(0)
+        ent = self.map.get(m.group(0), "ip")
+        self.terms.setdefault(m.group(0), ent)
+        return self._use(ent)
+
+    def _term(self, m) -> str:
+        if not _bounded(m.string, m.start(), m.end()):
+            return m.group(0)
+        ent = self.terms.get(m.group(0).lower())
+        return _match_case(m.group(0), self._use(ent)) if ent else m.group(0)
+
+    def apply(self, text: str) -> str:
+        text = EMAIL_RE.sub(self._email, text)
+        text = IPV4_RE.sub(self._ip, text)
+        words = [t for t, ent in self.terms.items() if ent["kind"] not in ("email", "ip")]
+        if words:
+            if self._rx is None:
+                alts = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+                self._rx = re.compile(f"(?:{alts})", re.IGNORECASE)
+            text = self._rx.sub(self._term, text)
+        return text
+
+    def leaks(self, text: str) -> list:
+        """[(original, count, first_line)] for originals that still appear somewhere (any case, substring)."""
+        low, out = text.lower(), []
+        for key, ent in self.terms.items():
+            n = low.count(key)
+            if n:
+                out.append((ent["original"], n, low[:low.index(key)].count("\n") + 1))
+        return sorted(out, key=lambda x: x[2])
+
+    def summary(self) -> str:
+        counts = Counter(self.used.values())
+        parts = []
+        for kind, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            plural = kind[:-1] + "ies" if kind.endswith("y") else kind + "s"
+            parts.append(f"{n} {kind if n == 1 else plural}")
+        return ", ".join(parts) or "nothing to replace"
+
+
+def deanonymize(text: str, amap: AnonMap) -> str:
+    if not amap.by_pseudo:
+        return text
+    alts = "|".join(re.escape(p) for p in sorted(amap.by_pseudo, key=len, reverse=True))
+    rx = re.compile(f"(?:{alts})", re.IGNORECASE)
+
+    def repl(m):
+        if not _bounded(m.string, m.start(), m.end()) or m.string[m.end():m.end() + 1] == "@":
+            return m.group(0)
+        return _match_case(m.group(0), amap.by_pseudo[m.group(0).lower()]["original"])
+
+    return rx.sub(repl, text)
+
+
+def anon_prompt_bundle(name: str, auto: AutoTerms, ac: AnonConfig, skim: str) -> str:
+    def items(xs):
+        return ", ".join(xs) or "(none)"
+    persons = [f"{n} <{', '.join(e)}>" if e else n for n, e in auto.persons.items()]
+    out = [
+        f"# Anonymization analysis: {name}",
+        "",
+        "> Contains original, NOT anonymized data. Give this file to an internal LLM only.",
+        "",
+        "## Task",
+        "",
+        ANON_PROMPT,
+        "",
+        "## Already covered",
+        "",
+        "gitskim replaces these on its own, together with every e-mail address and IPv4 address in the text:",
+        "",
+        f"- People (git authors): {items(persons + auto.emails)}",
+        f"- Domains (from git remotes): {items(auto.domains)}",
+        f"- Organisations (remote owners): {items(auto.orgs)}",
+        f"- Projects (repo and folder names): {items(auto.projects)}",
+        "",
+    ]
+    if ac.terms or ac.domains or ac.keep:
+        out += ["## Current [anonymize] config (extend it, keep these entries)", "", "```ini", "[anonymize]"]
+        out += ["terms ="] + [f"    {t}" + (f" = {k}" if k != "company" else "") for t, k in ac.terms]
+        out += ["domains ="] + [f"    {d}" for d in ac.domains]
+        out += ["keep ="] + [f"    {k}" for k in ac.keep]
+        out += ["```", ""]
+    out += ["## Repository skim", "", "---", "", skim]
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
@@ -873,6 +1360,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diff", action="store_true", help="append working-tree and staged diff")
     p.add_argument("--log", type=int, default=0, metavar="N", help="append last N commits")
     p.add_argument("--no-secret-scan", action="store_true", help="disable secret heuristics")
+    p.add_argument("--anonymize", action="store_true",
+                   help="replace company, people, host and project names with stable pseudonyms (see [anonymize] in the config)")
+    p.add_argument("--no-anonymize", action="store_true", help="do not anonymize, even if the config enables it")
+    p.add_argument("--anon-prompt", action="store_true",
+                   help="write an LLM prompt plus the NOT anonymized skim, to build the [anonymize] config with an internal LLM")
+    p.add_argument("--deanonymize", nargs="?", const="-", metavar="FILE",
+                   help="translate pseudonyms in FILE (default: stdin) back to the originals, print to stdout")
+    p.add_argument("--anon-map", metavar="FILE", help="pseudonym mapping file (default: anon-map.json next to the config)")
     p.add_argument("--multi", action="store_true", help="treat source as a folder of repos even if it is a repo itself")
     p.add_argument("--scan-depth", type=non_negative_int, metavar="N",
                    help="how deep to look for repos in multi-repo mode (default: 3)")
@@ -914,7 +1409,8 @@ ignore_dirs =
 
 # max_size = 100
 # scan_depth = 3
-"""
+
+""" + ANON_SECTION
 
 CONFIG_KEYS = {"workspace", "output_dir", "exclude", "ignore_dirs", "max_size", "scan_depth"}
 
@@ -928,6 +1424,7 @@ class Config:
     ignore_dirs: list = field(default_factory=list)
     max_size: Optional[int] = None
     scan_depth: Optional[int] = None
+    anon: AnonConfig = field(default_factory=AnonConfig)
 
 
 def default_config_path() -> Path:
@@ -975,6 +1472,8 @@ def load_config(path: Optional[str]) -> Config:
             except ValueError:
                 raise GitskimError(f"invalid config {p}: {key} must be an integer >= 0") from None
             setattr(cfg, key, value)
+    if cp.has_section("anonymize"):
+        cfg.anon = parse_anon_section(cp["anonymize"], p)
     return cfg
 
 
@@ -1093,6 +1592,18 @@ def skim_many(root: Path, rels: list, opts: Options, args) -> tuple:
     return entries, repos, diffs, logs
 
 
+def anon_setup_needed(cfg_path: Path, what: str) -> int:
+    """Explain the first-time setup and return exit code 2 (no output written)."""
+    head = {"created": f"created {cfg_path} with an [anonymize] section",
+            "appended": f"added an [anonymize] section to {cfg_path}",
+            "empty": f"[anonymize] in {cfg_path} has no terms or domains yet"}[what]
+    warn(f"{head}; nothing written. Next steps:\n"
+         "  1. gitskim --anon-prompt <project>   (prompt + NOT anonymized skim, for an INTERNAL LLM only)\n"
+         f"  2. paste the [anonymize] block the LLM returns into {cfg_path}\n"
+         "  3. run --anonymize again (or set confirmed = true to rely on automatic detection only)")
+    return 2
+
+
 def main(argv: Optional[list] = None) -> int:
     global QUIET
     args = build_parser().parse_args(argv)
@@ -1103,13 +1614,36 @@ def main(argv: Optional[list] = None) -> int:
         if args.init_config:
             warn(f"wrote {init_config(args.config)}")
             return 0
+        if args.anonymize and args.anon_prompt:
+            raise GitskimError("--anonymize and --anon-prompt exclude each other")
+        if args.anonymize and args.no_anonymize:
+            raise GitskimError("--anonymize and --no-anonymize exclude each other")
+        cfg_path = Path(args.config).expanduser() if args.config else default_config_path()
+        if args.anonymize and not cfg_path.exists():
+            return anon_setup_needed(cfg_path, ensure_anon_section(cfg_path))
         cfg = load_config(args.config)
+        map_path = Path(args.anon_map or cfg.anon.map or default_map_path(cfg.path or cfg_path)).expanduser()
+        if args.deanonymize is not None:
+            if not map_path.is_file():
+                raise GitskimError(f"no pseudonym mapping at {map_path} (written by --anonymize)")
+            try:
+                text = sys.stdin.read() if args.deanonymize == "-" else Path(args.deanonymize).read_text(encoding="utf-8")
+            except OSError as ex:
+                raise GitskimError(f"cannot read {args.deanonymize}: {ex}") from None
+            sys.stdout.write(deanonymize(text, AnonMap(map_path)))
+            return 0
+        anonymize = not args.anon_prompt and (args.anonymize or (cfg.anon.enabled and not args.no_anonymize))
+        if anonymize:
+            if not cfg.anon.present:
+                return anon_setup_needed(cfg_path, ensure_anon_section(cfg_path))
+            if not (cfg.anon.terms or cfg.anon.domains or cfg.anon.confirmed):
+                return anon_setup_needed(cfg_path, "empty")
         scan_depth = args.scan_depth if args.scan_depth is not None else (cfg.scan_depth if cfg.scan_depth is not None else 3)
         opts = Options(
             full=args.full, include=args.include, exclude=cfg.exclude + args.exclude,
             max_size_kb=args.max_size if args.max_size is not None else (cfg.max_size if cfg.max_size is not None else 100),
             default_ignore=not args.no_default_ignore, untracked=args.untracked, sort=args.sort,
-            secret_scan=not args.no_secret_scan, ignore_dirs=cfg.ignore_dirs,
+            secret_scan=not args.no_secret_scan, ignore_dirs=cfg.ignore_dirs, anonymized=anonymize,
         )
         output_dir = args.output_dir or os.environ.get("GITSKIM_OUTPUT_DIR") or cfg.output_dir
         if shutil.which("git") is None:
@@ -1148,6 +1682,7 @@ def main(argv: Optional[list] = None) -> int:
                 name = cfg.workspace.resolve().name
             else:
                 name = "+".join(r.rsplit("/", 1)[-1] for r in rels)
+            scanned = [(cfg.workspace / rel, rel) for rel in rels]
             if len(rels) == 1 and args.source:
                 repo = cfg.workspace / rels[0]
                 entries = skim_repo(repo, opts)
@@ -1167,6 +1702,7 @@ def main(argv: Optional[list] = None) -> int:
                     hint = f" (and no such project in workspace {cfg.workspace})" if projects is not None else ""
                     raise GitskimError(f"{what} {source}{hint}")
                 name = root.resolve().name
+                scanned = [(root / rel, rel) for rel in found]
                 entries, repos, diffs, logs = skim_many(root, found, opts, args)
                 branch = commit = "-"
             else:
@@ -1177,6 +1713,7 @@ def main(argv: Optional[list] = None) -> int:
                         raise GitskimError(f"unknown project '{source}' in workspace {cfg.workspace}; "
                                            f"available: {', '.join(projects) or '(none)'}") from None
                     raise ex
+                scanned = [(repo, name)]
                 entries = skim_repo(repo, opts, label=name)
                 branch, commit = repo_meta(repo)
                 diffs, logs = recent_changes(repo, args)
@@ -1187,6 +1724,26 @@ def main(argv: Optional[list] = None) -> int:
             elif e.status == "ok" and e.tokens > LARGE_FILE_TOKENS:
                 warn(f"{e.path} is large (~{fmt_tokens(e.tokens)} tokens est.)")
         md = render(name, branch, commit, entries, opts, diff=diffs, log=logs, repos=repos)
+        if args.anon_prompt or anonymize:
+            auto = collect_auto_terms(scanned)
+        if args.anon_prompt:
+            md = anon_prompt_bundle(name, auto, cfg.anon, md)
+            name += "_anon-prompt"
+            warn("the --anon-prompt output contains original, NOT anonymized data: give it to an internal LLM only")
+        elif anonymize:
+            amap = AnonMap(map_path)
+            anon = Anonymizer(amap, cfg.anon.keep)
+            anon.add_config(cfg.anon)
+            anon.add_auto(auto)
+            md, name = anon.apply(md), anon.apply(name)
+            for original, n, line in anon.leaks(md)[:10]:
+                warn(f"anonymize: '{original}' still appears {n}x (first in line {line}); "
+                     "add the spelling to terms or check the output")
+            try:
+                amap.save()
+            except OSError as ex:
+                raise GitskimError(f"cannot write mapping {map_path}: {ex}") from None
+            info(f"anonymized: {anon.summary()} (mapping: {map_path})")
         if args.stdout:
             try:
                 sys.stdout.write(md)
