@@ -62,6 +62,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertIn("gitskim", res.stdout)
         self.assertIn("--full", res.stdout)
+        self.assertIn("--skim", res.stdout)
 
 
 class TestResolveSource(unittest.TestCase):
@@ -774,7 +775,7 @@ class TestEndToEnd(unittest.TestCase):
         )
 
     def test_skim_mode_output(self):
-        res = self.run_cli()
+        res = self.run_cli("--skim")
         self.assertEqual(res.returncode, 0, res.stderr)
         out = res.stdout
         self.assertTrue(out.startswith(f"# {self.repo.name}\n"))
@@ -808,6 +809,17 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("mode: full", res.stdout)
         self.assertIn("return 1", res.stdout)
+
+    def test_full_is_default(self):
+        res = self.run_cli()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("mode: full", res.stdout)
+        self.assertIn("return 1", res.stdout)
+
+    def test_skim_and_full_exclude_each_other(self):
+        res = self.run_cli("--skim", "--full")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("not allowed with", res.stderr)
 
     def test_no_secret_scan_includes_config(self):
         res = self.run_cli("--no-secret-scan")

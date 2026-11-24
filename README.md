@@ -3,7 +3,7 @@
 Skim a git repository into **one compact Markdown file** for LLM context.
 
 - **Single file, stdlib only.** `python3 gitskim.py <repo>`. No pip install, no token, no Rust, no Node.
-- **Signatures, not bodies.** Default mode keeps structure: imports, classes, function signatures, docstrings. Python via `ast`, other languages via heuristics. `--full` for everything.
+- **Full text or signatures.** By default every file goes in with its full contents. `--skim` keeps only the structure: imports, classes, function signatures, docstrings. Python via `ast`, other languages via heuristics.
 - **Git does the heavy lifting.** `git ls-files` gives the file set with correct `.gitignore` semantics. `git log` ranks files by how often they change, so the important ones come first.
 - **Database schema section** from Liquibase changelogs (XML, formatted SQL, YAML) and SQL migrations.
 - **Secret heuristics** on by default: files that look like they contain keys, tokens or passwords are skipped and flagged.
@@ -14,7 +14,7 @@ Skim a git repository into **one compact Markdown file** for LLM context.
     python3 gitskim.py .                       # -> <repo>_2026-10-12_1432.md
     python3 gitskim.py ~/code/project -o ctx.md
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
-    python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
+    python3 gitskim.py . --skim --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
     python3 gitskim.py ~/code                   # folder of repos -> one combined file
     python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/<repo>_2026-10-12_1432.md
@@ -25,7 +25,8 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `-o FILE` | `<repo>_<YYYY-MM-DD_HHMM>.md` | output file (written to the current directory by default) |
 | `--output-dir DIR` | `$GITSKIM_OUTPUT_DIR`, then config | write into DIR (created if missing) under the default name, or as `DIR/FILE` together with `-o` |
 | `--stdout` | | print instead of writing a file |
-| `--full` | off | full file contents instead of signatures |
+| `--skim` | off | only signatures, imports and docstrings instead of full file contents |
+| `--full` | on | full file contents (the default; kept for compatibility) |
 | `--include GLOB` | | only matching files (repeatable) |
 | `--exclude GLOB` | | skip matching files (repeatable) |
 | `--max-size KB` | `100` (or config) | larger files appear in the tree only |
@@ -154,7 +155,7 @@ With `confirmed = true` and no terms, only the automatic detection runs. Names t
     ## Files            one section per file, most-changed first
     ## Recent changes   only with --diff / --log
 
-Every `README.md` is included in full in skim mode (as long as it is under `--max-size`); a very large README can dominate the token budget. See [`examples/SKIM-self.md`](examples/SKIM-self.md) for gitskim applied to itself.
+Every `README.md` is included in full even with `--skim` (as long as it is under `--max-size`); a very large README can dominate the token budget. See [`examples/SKIM-self.md`](examples/SKIM-self.md) for gitskim applied to itself.
 
 ## How it compares
 
