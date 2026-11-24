@@ -11,18 +11,18 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 
 ## Usage
 
-    python3 gitskim.py .                       # -> <repo>_2026-10-12_1432.md
+    python3 gitskim.py .                       # -> skim-<repo>_2026-10-12_1432.md
     python3 gitskim.py ~/code/project -o ctx.md
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
     python3 gitskim.py ~/code                   # folder of repos -> one combined file
-    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/<repo>_2026-10-12_1432.md
+    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/skim-<repo>_2026-10-12_1432.md
     python3 gitskim.py api                      # project from the configured workspace (see Config file)
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-o FILE` | `<repo>_<YYYY-MM-DD_HHMM>.md` | output file (written to the current directory by default) |
+| `-o FILE` | `skim-<repo>_<YYYY-MM-DD_HHMM>.md` | output file (written to the current directory by default) |
 | `--output-dir DIR` | `$GITSKIM_OUTPUT_DIR`, then config | write into DIR (created if missing) under the default name, or as `DIR/FILE` together with `-o` |
 | `--stdout` | | print instead of writing a file |
 | `--full` | off | full file contents instead of signatures |
@@ -70,8 +70,8 @@ scan_depth = 3
 
 With a workspace configured:
 
-- `gitskim api` skims `<workspace>/api` into `<output_dir>/api_<timestamp>.md`. Projects are found like in multi-repo mode and can be named by their path below the workspace (`team/web`) or, when unique, by folder name (`web`). A name that matches a project wins over a same-named folder in the current directory.
-- `gitskim api web` skims several projects into one file (`api+web_<timestamp>.md`); plain `gitskim` skims the whole workspace.
+- `gitskim api` skims `<workspace>/api` into `<output_dir>/skim-api_<timestamp>.md`. Projects are found like in multi-repo mode and can be named by their path below the workspace (`team/web`) or, when unique, by folder name (`web`). A name that matches a project wins over a same-named folder in the current directory.
+- `gitskim api web` skims several projects into one file (`skim-api+web_<timestamp>.md`); plain `gitskim` skims the whole workspace.
 - `gitskim --list` shows the project names. Paths and URLs keep working as before.
 
 Command-line flags win over the config. `--exclude` adds to the configured `exclude` list; config `exclude` and `ignore_dirs` always apply, even with `--include` or `--no-default-ignore`. The output folder is taken from `--output-dir`, then `$GITSKIM_OUTPUT_DIR`, then `output_dir`.
@@ -116,7 +116,7 @@ For handing company code to an external LLM without naming the company, its cust
 **First-time setup**, done once with an *internal* LLM, which knows which names matter:
 
 1. `gitskim --anonymize api` finds no `[anonymize]` section, creates the config (or appends the section to an existing one), explains the next steps and exits with code 2 without writing anything. The section's comments contain the prompt.
-2. `gitskim --anon-prompt api` writes `api_anon-prompt_<timestamp>.md`: the prompt, what gitskim already detects on its own, the current terms, and a normal, **not anonymized** skim.
+2. `gitskim --anon-prompt api` writes `skim-api_anon-prompt_<timestamp>.md`: the prompt, what gitskim already detects on its own, the current terms, and a normal, **not anonymized** skim.
 3. Give that file to an internal LLM. It returns an `[anonymize]` block and a check list (term, kind, reason, location). It does not rewrite the skim; gitskim does that, so the output stays complete and matches the mapping.
 4. Paste the block into the config. From then on `gitskim --anonymize api` (or `enabled = true`) writes the anonymized skim.
 

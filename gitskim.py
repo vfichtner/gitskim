@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gitskim – skim a git repository into one compact Markdown file for LLM context.
 
-Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: <repo>_<YYYY-MM-DD_HHMM>.md)
+Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: skim-<repo>_<YYYY-MM-DD_HHMM>.md)
 """
 from __future__ import annotations
 
@@ -1346,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", metavar="FILE", help="config file (default: $GITSKIM_CONFIG or ~/.config/gitskim/config.ini)")
     p.add_argument("--init-config", action="store_true", help="write a commented config template and exit")
     p.add_argument("--list", action="store_true", help="list the projects in the configured workspace and exit")
-    p.add_argument("-o", "--output", help="output file (default: <repo>_<YYYY-MM-DD_HHMM>.md)")
+    p.add_argument("-o", "--output", help="output file (default: skim-<repo>_<YYYY-MM-DD_HHMM>.md)")
     p.add_argument("--output-dir", metavar="DIR",
                    help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR, then output_dir from the config)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
@@ -1498,8 +1498,8 @@ def resolve_project(name: str, projects: list) -> Optional[str]:
 
 
 def default_output_name(name: str, now: Optional[_dt.datetime] = None) -> str:
-    """<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
-    return f"{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
+    """skim-<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
+    return f"skim-{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
 
 
 def output_path(output: Optional[str], output_dir: Optional[str], name: str) -> Path:

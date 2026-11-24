@@ -837,12 +837,12 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         files = [p.name for p in cwd.iterdir()]
         self.assertEqual(len(files), 1)
-        self.assertRegex(files[0], rf"^{re.escape(self.repo.name)}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{4}}\.md$")
+        self.assertRegex(files[0], rf"^skim-{re.escape(self.repo.name)}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{4}}\.md$")
         self.assertIn(files[0], res.stderr)
 
     def test_default_output_name_format(self):
         now = gitskim._dt.datetime(2026, 10, 12, 14, 32, 59)
-        self.assertEqual(gitskim.default_output_name("gitskim", now), "gitskim_2026-10-12_1432.md")
+        self.assertEqual(gitskim.default_output_name("gitskim", now), "skim-gitskim_2026-10-12_1432.md")
 
     def test_output_dir(self):
         out_dir = Path(tempfile.mkdtemp())
@@ -855,7 +855,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         files = [p.name for p in target.iterdir()]
         self.assertEqual(len(files), 1)
-        self.assertRegex(files[0], rf"^{re.escape(self.repo.name)}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{4}}\.md$")
+        self.assertRegex(files[0], rf"^skim-{re.escape(self.repo.name)}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{4}}\.md$")
 
     def test_output_dir_from_env_with_filename(self):
         out_dir = Path(tempfile.mkdtemp())
@@ -994,7 +994,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         files = list(self.out.iterdir())
         self.assertEqual(len(files), 1)
-        self.assertTrue(files[0].name.startswith("api_"))
+        self.assertTrue(files[0].name.startswith("skim-api_"))
         md = files[0].read_text(encoding="utf-8")
         self.assertTrue(md.startswith("# api\n"))
         self.assertIn("### app.py", md)
@@ -1216,7 +1216,7 @@ class TestAnonymizeCli(unittest.TestCase):
         res = self.run_cli("--anonymize", str(named), "--output-dir", str(self.dir / "out"))
         self.assertEqual(res.returncode, 0, res.stderr)
         [f] = (self.dir / "out").iterdir()
-        self.assertTrue(f.name.startswith("project1_"), f.name)      # case follows the original
+        self.assertTrue(f.name.startswith("skim-project1_"), f.name)      # case follows the original
         self.assertTrue(f.read_text(encoding="utf-8").startswith("# project1\n"))
 
     def test_config_enabled_and_no_anonymize(self):
