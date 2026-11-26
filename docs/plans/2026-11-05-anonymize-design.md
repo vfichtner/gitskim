@@ -156,8 +156,9 @@ Warnung ignoriert.
 - **Stelle in der Pipeline:** ueber den fertig gerenderten Markdown-String
   (`render()` → `anonymize(text)`), damit Titel, Baum, Pfade, Tabellen,
   Inhalte, `--log`, `--diff` und die Repositories-Tabelle gleich behandelt
-  werden. Auch der Default-Ausgabename nutzt das Pseudonym
-  (`Project1_2026-11-05_1432.md`).
+  werden. Der Default-Ausgabename behaelt dagegen den Originalnamen und
+  bekommt das Praefix `SKIM-anon-` (`SKIM-anon-billing-portal_2026-11-05_1432.md`),
+  damit erkennbar bleibt, welche Komponente es ist.
 - **Ein kombinierter Regex**, laengste Begriffe zuerst, case-insensitiv.
 - **Grenzen:** Wortgrenze *oder* camelCase-/Trenner-Grenze. `AcmeBilling` →
   `Company1Billing`, `com.acme.api` → `com.company1.api`, `acme_core` →

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gitskim – skim a git repository into one compact Markdown file for LLM context.
 
-Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: <repo>_<YYYY-MM-DD_HHMM>.md)
+Single file, standard library only. Usage: python3 gitskim.py <path-or-url> [-o FILE]  (default: SKIM-<repo>_<YYYY-MM-DD_HHMM>.md)
 """
 from __future__ import annotations
 
@@ -1346,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", metavar="FILE", help="config file (default: $GITSKIM_CONFIG or ~/.config/gitskim/config.ini)")
     p.add_argument("--init-config", action="store_true", help="write a commented config template and exit")
     p.add_argument("--list", action="store_true", help="list the projects in the configured workspace and exit")
-    p.add_argument("-o", "--output", help="output file (default: <repo>_<YYYY-MM-DD_HHMM>.md)")
+    p.add_argument("-o", "--output", help="output file (default: SKIM-<repo>_<YYYY-MM-DD_HHMM>.md, SKIM-anon-<repo>_... when anonymized)")
     p.add_argument("--output-dir", metavar="DIR",
                    help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR, then output_dir from the config)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
@@ -1497,18 +1497,18 @@ def resolve_project(name: str, projects: list) -> Optional[str]:
     return hits[0] if hits else None
 
 
-def default_output_name(name: str, now: Optional[_dt.datetime] = None) -> str:
-    """<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
-    return f"{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
+def default_output_name(name: str, now: Optional[_dt.datetime] = None, anon: bool = False) -> str:
+    """SKIM-[anon-]<repo>_<YYYY-MM-DD_HHMM>.md: sortable, no colons (safe on Windows)."""
+    return f"SKIM-{'anon-' if anon else ''}{name}_{(now or _dt.datetime.now()).strftime('%Y-%m-%d_%H%M')}.md"
 
 
-def output_path(output: Optional[str], output_dir: Optional[str], name: str) -> Path:
+def output_path(output: Optional[str], output_dir: Optional[str], name: str, anon: bool = False) -> Path:
     """-o alone: as given. --output-dir alone: DIR/<default name>. Both: DIR/<-o> (unless -o is absolute)."""
     if not output_dir:
-        return Path(output or default_output_name(name))
+        return Path(output or default_output_name(name, anon=anon))
     d = Path(output_dir).expanduser()
     d.mkdir(parents=True, exist_ok=True)
-    return d / Path(output).expanduser() if output else d / default_output_name(name)
+    return d / Path(output).expanduser() if output else d / default_output_name(name, anon=anon)
 
 
 def repo_meta(repo: Path) -> tuple:
@@ -1735,7 +1735,7 @@ def main(argv: Optional[list] = None) -> int:
             anon = Anonymizer(amap, cfg.anon.keep)
             anon.add_config(cfg.anon)
             anon.add_auto(auto)
-            md, name = anon.apply(md), anon.apply(name)
+            md = anon.apply(md)              # the file name keeps the original name: SKIM-anon-<repo>_...
             for original, n, line in anon.leaks(md)[:10]:
                 warn(f"anonymize: '{original}' still appears {n}x (first in line {line}); "
                      "add the spelling to terms or check the output")
@@ -1756,7 +1756,7 @@ def main(argv: Optional[list] = None) -> int:
                  f"~{fmt_tokens(estimate_tokens(md))} tokens est., {time.monotonic() - started:.1f}s)")
         else:
             try:
-                out_path = output_path(args.output, output_dir, name)
+                out_path = output_path(args.output, output_dir, name, anon=anonymize)
                 out_path.write_text(md, encoding="utf-8")
             except OSError as ex:
                 raise GitskimError(f"cannot write output: {ex}") from None

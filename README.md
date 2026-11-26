@@ -11,13 +11,13 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 
 ## Usage
 
-    python3 gitskim.py .                       # -> <repo>_2026-10-12_1432.md
+    python3 gitskim.py .                       # -> SKIM-<repo>_2026-10-12_1432.md
     python3 gitskim.py ~/code/project -o ctx.md
     python3 gitskim.py https://github.com/user/repo --stdout | pbcopy
     python3 gitskim.py . --full --include "src/*" --exclude "*.test.ts"
     python3 gitskim.py . --diff --log 20        # append working-tree diff + last 20 commits
     python3 gitskim.py ~/code                   # folder of repos -> one combined file
-    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/<repo>_2026-10-12_1432.md
+    python3 gitskim.py . --output-dir ~/skims   # -> ~/skims/SKIM-<repo>_2026-10-12_1432.md
     python3 gitskim.py api                      # project from the configured workspace (see Config file)
 
 | Flag | Default | Meaning |
@@ -70,8 +70,8 @@ scan_depth = 3
 
 With a workspace configured:
 
-- `gitskim api` skims `<workspace>/api` into `<output_dir>/api_<timestamp>.md`. Projects are found like in multi-repo mode and can be named by their path below the workspace (`team/web`) or, when unique, by folder name (`web`). A name that matches a project wins over a same-named folder in the current directory.
-- `gitskim api web` skims several projects into one file (`api+web_<timestamp>.md`); plain `gitskim` skims the whole workspace.
+- `gitskim api` skims `<workspace>/api` into `<output_dir>/SKIM-api_<timestamp>.md`. Projects are found like in multi-repo mode and can be named by their path below the workspace (`team/web`) or, when unique, by folder name (`web`). A name that matches a project wins over a same-named folder in the current directory.
+- `gitskim api web` skims several projects into one file (`SKIM-api+web_<timestamp>.md`); plain `gitskim` skims the whole workspace.
 - `gitskim --list` shows the project names. Paths and URLs keep working as before.
 
 Command-line flags win over the config. `--exclude` adds to the configured `exclude` list; config `exclude` and `ignore_dirs` always apply, even with `--include` or `--no-default-ignore`. The output folder is taken from `--output-dir`, then `$GITSKIM_OUTPUT_DIR`, then `output_dir`.
@@ -86,7 +86,7 @@ If the path is a folder that is not itself inside a git repository, gitskim look
 - With `--sort changes`, files from all repos are ranked together by commit count.
 - `--diff` / `--log` produce one subsection per repo.
 
-Without `-o`, every run writes a new timestamped file, so add `*_20??-??-??_????.md` to the `.gitignore` of the repos you skim.
+Without `-o`, every run writes a new timestamped file, so add `SKIM-*.md` to the `.gitignore` of the repos you skim.
 
 ### Filtering rules
 
@@ -116,7 +116,7 @@ For handing company code to an external LLM without naming the company, its cust
 **First-time setup**, done once with an *internal* LLM, which knows which names matter:
 
 1. `gitskim --anonymize api` finds no `[anonymize]` section, creates the config (or appends the section to an existing one), explains the next steps and exits with code 2 without writing anything. The section's comments contain the prompt.
-2. `gitskim --anon-prompt api` writes `api_anon-prompt_<timestamp>.md`: the prompt, what gitskim already detects on its own, the current terms, and a normal, **not anonymized** skim.
+2. `gitskim --anon-prompt api` writes `SKIM-api_anon-prompt_<timestamp>.md`: the prompt, what gitskim already detects on its own, the current terms, and a normal, **not anonymized** skim.
 3. Give that file to an internal LLM. It returns an `[anonymize]` block and a check list (term, kind, reason, location). It does not rewrite the skim; gitskim does that, so the output stays complete and matches the mapping.
 4. Paste the block into the config. From then on `gitskim --anonymize api` (or `enabled = true`) writes the anonymized skim.
 
@@ -135,7 +135,7 @@ keep =                  # never replaced
 
 **Detected automatically:** git authors (full name, name parts of 4+ letters and the e-mail login get the same `PersonN`), every e-mail address and IPv4 address in the text, internal git remote domains, remote owners and repo/folder names. Common words (`api`, `web`, `core`, `test`, …), loopback and documentation addresses, `example.com` and public git hosts are left alone. Terms shorter than 3 characters are ignored.
 
-**Matching** is case-insensitive and keeps the case (`ACME` → `COMPANY1`, `acme` → `company1`), at word, camelCase and separator boundaries (`AcmeBilling`, `com.acme.api`, `acme_core`), but not inside a word (`Acmeist`) or before a digit (`acme2`). It runs over the whole rendered file, including tree, paths, `--log` and `--diff`; the default output file name uses the pseudonym too. The header says `mode: skim · anonymized`.
+**Matching** is case-insensitive and keeps the case (`ACME` → `COMPANY1`, `acme` → `company1`), at word, camelCase and separator boundaries (`AcmeBilling`, `com.acme.api`, `acme_core`), but not inside a word (`Acmeist`) or before a digit (`acme2`). It runs over the whole rendered file, including tree, paths, `--log` and `--diff`; the default output file name keeps the original name with an `anon` prefix (`SKIM-anon-api_<timestamp>.md`), so you can tell which project it is. The header says `mode: skim · anonymized`.
 
 **Mapping:** `anon-map.json` next to the config (mode `0600`) is reused across runs and repos, so `Acme` stays `Company1`. It contains the originals: keep it out of any repository. `gitskim --deanonymize answer.md` (or `pbpaste | gitskim --deanonymize`) translates an LLM answer back.
 
