@@ -1350,7 +1350,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", metavar="DIR",
                    help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR, then output_dir from the config)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
-    p.add_argument("--full", action="store_true", help="full file contents instead of signatures")
+    p.add_argument("--skim", action="store_true",
+                   help="only signatures, imports and docstrings instead of full file contents")
     p.add_argument("--include", action="append", default=[], metavar="GLOB", help="only files matching GLOB (repeatable)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB", help="skip files matching GLOB (repeatable)")
     p.add_argument("--max-size", type=non_negative_int, metavar="KB", help="skip files larger than KB (default: 100)")
@@ -1640,7 +1641,7 @@ def main(argv: Optional[list] = None) -> int:
                 return anon_setup_needed(cfg_path, "empty")
         scan_depth = args.scan_depth if args.scan_depth is not None else (cfg.scan_depth if cfg.scan_depth is not None else 3)
         opts = Options(
-            full=args.full, include=args.include, exclude=cfg.exclude + args.exclude,
+            full=not args.skim, include=args.include, exclude=cfg.exclude + args.exclude,
             max_size_kb=args.max_size if args.max_size is not None else (cfg.max_size if cfg.max_size is not None else 100),
             default_ignore=not args.no_default_ignore, untracked=args.untracked, sort=args.sort,
             secret_scan=not args.no_secret_scan, ignore_dirs=cfg.ignore_dirs, anonymized=anonymize,
