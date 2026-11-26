@@ -1350,10 +1350,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", metavar="DIR",
                    help="write into DIR, created if missing (default: $GITSKIM_OUTPUT_DIR, then output_dir from the config)")
     p.add_argument("--stdout", action="store_true", help="write to stdout instead of a file")
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--skim", action="store_true",
-                      help="only signatures, imports and docstrings instead of full file contents")
-    mode.add_argument("--full", action="store_true", help="full file contents (the default; kept for compatibility)")
+    p.add_argument("--skim", action="store_true",
+                   help="only signatures, imports and docstrings instead of full file contents")
     p.add_argument("--include", action="append", default=[], metavar="GLOB", help="only files matching GLOB (repeatable)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB", help="skip files matching GLOB (repeatable)")
     p.add_argument("--max-size", type=non_negative_int, metavar="KB", help="skip files larger than KB (default: 100)")

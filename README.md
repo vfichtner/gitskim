@@ -26,7 +26,6 @@ Skim a git repository into **one compact Markdown file** for LLM context.
 | `--output-dir DIR` | `$GITSKIM_OUTPUT_DIR`, then config | write into DIR (created if missing) under the default name, or as `DIR/FILE` together with `-o` |
 | `--stdout` | | print instead of writing a file |
 | `--skim` | off | only signatures, imports and docstrings instead of full file contents |
-| `--full` | on | full file contents (the default; kept for compatibility) |
 | `--include GLOB` | | only matching files (repeatable) |
 | `--exclude GLOB` | | skip matching files (repeatable) |
 | `--max-size KB` | `100` (or config) | larger files appear in the tree only |

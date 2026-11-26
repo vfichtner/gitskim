@@ -61,7 +61,6 @@ class TestCli(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0)
         self.assertIn("gitskim", res.stdout)
-        self.assertIn("--full", res.stdout)
         self.assertIn("--skim", res.stdout)
 
 
@@ -804,22 +803,11 @@ class TestEndToEnd(unittest.TestCase):
         self.assertNotIn("### config.py", out)
         self.assertIn("possible secret", res.stderr)
 
-    def test_full_mode(self):
-        res = self.run_cli("--full")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("mode: full", res.stdout)
-        self.assertIn("return 1", res.stdout)
-
     def test_full_is_default(self):
         res = self.run_cli()
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("mode: full", res.stdout)
         self.assertIn("return 1", res.stdout)
-
-    def test_skim_and_full_exclude_each_other(self):
-        res = self.run_cli("--skim", "--full")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("not allowed with", res.stderr)
 
     def test_no_secret_scan_includes_config(self):
         res = self.run_cli("--no-secret-scan")
@@ -1201,7 +1189,7 @@ class TestAnonymizeCli(unittest.TestCase):
 
     def test_anonymize_end_to_end(self):
         self.configure()
-        res = self.run_cli("--anonymize", str(self.repo), "--full", "--stdout")
+        res = self.run_cli("--anonymize", str(self.repo), "--stdout")
         self.assertEqual(res.returncode, 0, res.stderr)
         md = res.stdout
         self.assertIn("mode: full · anonymized", md)
@@ -1238,7 +1226,7 @@ class TestAnonymizeCli(unittest.TestCase):
 
     def test_confirmed_runs_with_auto_detection_only(self):
         self.configure("confirmed = true\n")
-        res = self.run_cli("--anonymize", str(self.repo), "--full", "--stdout")
+        res = self.run_cli("--anonymize", str(self.repo), "--stdout")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertNotIn("Mustermann", res.stdout)        # git author
         self.assertIn("class Org1Billing", res.stdout)    # remote owner 'acme'
@@ -1246,7 +1234,7 @@ class TestAnonymizeCli(unittest.TestCase):
 
     def test_anon_prompt_bundle(self):
         self.configure("terms = Globex\n")
-        res = self.run_cli("--anon-prompt", str(self.repo), "--full", "--stdout")
+        res = self.run_cli("--anon-prompt", str(self.repo), "--stdout")
         self.assertEqual(res.returncode, 0, res.stderr)
         md = res.stdout
         self.assertIn("internal LLM only", md)
